@@ -4,7 +4,7 @@
 
 ## What This Server Is
 
-A single Go binary. No framework. No runtime. Two external dependencies. It starts in milliseconds, idles at ~12MB of memory, and its entire job is routing small JSON messages between browsers as fast as possible. It never touches video, audio, or any media bytes. The moment WebRTC peer connections are established between users, the server steps aside and becomes irrelevant to the actual watch party experience.
+A single Go binary. No framework. No runtime. Three external dependencies. It starts in milliseconds, idles at ~12MB of memory, and its entire job is routing small JSON messages between browsers as fast as possible. It never touches video, audio, or any media bytes. The moment WebRTC peer connections are established between users, the server steps aside and becomes irrelevant to the actual watch party experience.
 
 Every architectural decision in this document flows from four principles:
 - **Secure** — hostile inputs, bad actors, and flaky clients never affect other users
@@ -20,18 +20,19 @@ Every architectural decision in this document flows from four principles:
 Language        Go (latest stable)
 WebSocket       github.com/gorilla/websocket
 Redis client    github.com/redis/go-redis/v9
+Env loading     github.com/joho/godotenv
 TLS             Caddy (reverse proxy, auto Let's Encrypt)
 Redis           Local instance, localhost only
 ```
 
-Two dependencies. That is the entire external surface area of this server.
+Three dependencies. That is the entire external surface area of this server.
 
 ---
 
 ## Architecture — Three Layers
 
 ```
-��──────────────────────────────────────────────────────────┐
+┌──────────────────────────────────────────────────────────┐
 │                      HTTP Layer                          │
 │         POST /rooms          GET /rooms/:code            │
 │         Security middleware stack on every request       │
@@ -104,6 +105,10 @@ session:{token} String  { userId, name, roomCode }    TTL: 30 seconds
 ```
 
 The `room:{code}:members` Set from the original design is **removed entirely.** Redis does not track live membership.
+
+### hostId Lifecycle
+
+When a room is created via `POST /rooms`, the host's userId does not exist yet — the WebSocket connection hasn't been opened. The `hostId` field is written as `"pending"` at creation time and overwritten with the real userId when the first member joins via WebSocket.
 
 ### Redis Configuration
 
@@ -222,11 +227,18 @@ Server generates:
 Server stores in Redis:
     session:{token} → { userId, name, roomCode }   TTL: 30 seconds
 
-Server sends to client immediately:
-    { type: "session_init", payload: { userId, sessionToken } }
+Server sends two messages to client immediately, in this order:
+
+    1. { type: "session_token", payload: { sessionToken } }
+       ← client stores this BEFORE any room events arrive
+
+    2. { type: "session_init", payload: { userId } }
+       ← client now knows its stable identity
 
 Client stores sessionToken in sessionStorage
 ```
+
+The token is sent before Hub registration so the client has it before the first room event (`user_joined`, `room_state`) could trigger a reconnect attempt.
 
 **Reconnect (within 30 seconds):**
 ```
@@ -237,6 +249,8 @@ Client reconnects, sends token in first message:
 Server checks Redis: session:{token} exists?
     │
     ├── YES → restore userId, name, roomCode
+    │         token is deleted immediately (one-time use)
+    │         a fresh token is issued for the next reconnect window
     │         user rejoins as same identity
     │         broadcast { type: "user_reconnected" } — not user_joined
     │         peer connections in Step 5 survive intact
@@ -424,7 +438,8 @@ Client → Server:
     join                { name, sessionToken? }
 
 Server → Client:
-    session_init        { userId, sessionToken }
+    session_token       { sessionToken }             ← sent first, before Hub registration
+    session_init        { userId }                   ← sent second, after Hub registration
     room_state          { members: [{ userId, name }] }   ← sent immediately on join
     user_joined         { userId, name }
     user_left           { userId, name }
@@ -432,6 +447,8 @@ Server → Client:
     host_changed        { userId, name }
     error               { code, message }
 ```
+
+`session_token` is deliberately sent before `session_init` and before any room events. The client must have its reconnect token stored before it could ever need to use it.
 
 `room_state` is sent to the joining user immediately after registration. Without it, Alice joins and has no idea Bob is already there until Bob does something. This is the detail most implementations miss.
 
@@ -562,7 +579,7 @@ Access-Control-Allow-Headers  Content-Type
 govulncheck ./...    ← run before every deploy
 ```
 
-With two dependencies the attack surface is minimal. govulncheck scans both against the Go vulnerability database.
+With three dependencies the attack surface remains minimal. govulncheck scans all of them against the Go vulnerability database.
 
 ---
 
@@ -572,6 +589,7 @@ With two dependencies the attack surface is minimal. govulncheck scans both agai
 1. Host opens app
    POST /rooms
    ← { code: "WOLF-BEAR-4821" }
+   Redis: room:WOLF-BEAR-4821 written with hostId: "pending"
    Browser navigates to /room/WOLF-BEAR-4821
 
 2. Host enters name, clicks Join
@@ -583,8 +601,10 @@ With two dependencies the attack surface is minimal. govulncheck scans both agai
    Server:
    Generates userId + sessionToken
    Stores session:{token} in Redis (30s TTL)
+   Sends: { type: "session_token", payload: { sessionToken } }  ← before Hub registration
    Registers with Hub
-   Sends: { type: "session_init", payload: { userId, sessionToken } }
+   Redis: hostId updated from "pending" to real userId
+   Sends: { type: "session_init", payload: { userId } }
    Sends: { type: "room_state", payload: { members: [] } }   ← empty, host is first
 
 3. Friend receives room code, opens app
@@ -599,8 +619,9 @@ With two dependencies the attack surface is minimal. govulncheck scans both agai
 
    Server:
    Generates userId + sessionToken
+   Sends: { type: "session_token", payload: { sessionToken } }  ← before Hub registration
    Registers Alice with Hub
-   Sends Alice: { type: "session_init", ... }
+   Sends Alice: { type: "session_init", payload: { userId } }
    Sends Alice: { type: "room_state", payload: { members: [{ host }] } }
    Broadcasts to host: { type: "user_joined", payload: { userId, name: "Alice" } }
 
@@ -613,7 +634,10 @@ With two dependencies the attack surface is minimal. govulncheck scans both agai
    Sends: { type: "join", payload: { name: "Alice", sessionToken: "abc..." } }
 
    Server finds session in Redis — token valid:
+   Token deleted immediately (one-time use)
+   Fresh token issued for next reconnect window
    Restores alice-uuid as userId
+   Sends: { type: "session_token", payload: { newSessionToken } }
    Re-registers with Hub under same userId
    Broadcasts: { type: "user_reconnected", payload: { userId: alice-uuid } }
    ← NOT user_joined — clients know not to reset peer state
@@ -708,7 +732,3 @@ Each omission is a feature. Everything the server does not do is something that 
 ```
 
 This order matters — each file depends only on what came before it.
-
----
-
-Ready to write the code file by file in this exact order?
