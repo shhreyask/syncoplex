@@ -23,7 +23,7 @@ A browser-based watch party website where a group of friends can watch the same 
 Modelled after Skribbl.io. No accounts, no passwords, no OAuth. The flow is:
 
 - Host clicks "Create Room" → server generates a short room code like `WOLF-4821`
-- Host shares the link: `watchparty.app/room/WOLF-4821`
+- Host shares the link: `syncoplex.app/room/WOLF-4821`
 - Friends open the link, type a display name, and they're in
 
 Room state lives in Redis with a TTL so it automatically cleans up after the session ends. There is no user database. Sessions are ephemeral and tied entirely to the room lifetime. This was chosen because the friction of account creation is completely at odds with the casual, social nature of a watch party. You want the barrier to joining to be as close to zero as possible.

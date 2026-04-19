@@ -460,7 +460,7 @@ Rate Limiter              IP-based token bucket
 Security Headers          CSP, X-Frame-Options, nosniff, Referrer-Policy
         │
         ▼
-CORS Validation           Only https://watchparty.app — never wildcard
+CORS Validation           Only https://syncoplex.app — never wildcard
         │
         ▼
 Input Validation          Room codes regex-checked, names sanitized
@@ -479,7 +479,7 @@ Security is not bolted on after — it is the first thing every request passes t
 
 ```
 All traffic        →  TLS (HTTPS + WSS)
-Caddy Caddyfile    →  watchparty.app { reverse_proxy localhost:8080 }
+Caddy Caddyfile    →  syncoplex.app { reverse_proxy localhost:8080 }
                       That one line provisions and auto-renews Let's Encrypt
 Go server          →  Speaks plain HTTP internally, never exposed directly
 ```
@@ -489,7 +489,7 @@ Go server          →  Speaks plain HTTP internally, never exposed directly
 ```go
 var upgrader = websocket.Upgrader{
     CheckOrigin: func(r *http.Request) bool {
-        return r.Header.Get("Origin") == "https://watchparty.app"
+        return r.Header.Get("Origin") == "https://syncoplex.app"
     },
 }
 ```
@@ -525,7 +525,7 @@ Message rate limiting per connection prevents a single bad client from flooding 
 
 ```
 Content-Security-Policy      default-src 'self';
-                             connect-src 'self' wss://watchparty.app;
+                             connect-src 'self' wss://syncoplex.app;
                              media-src blob:;
                              script-src 'self';
                              style-src 'self'
@@ -551,7 +551,7 @@ Room code validation before any Redis call prevents injection-style attacks usin
 ### CORS
 
 ```
-Access-Control-Allow-Origin   https://watchparty.app    ← never wildcard
+Access-Control-Allow-Origin   https://syncoplex.app    ← never wildcard
 Access-Control-Allow-Methods  GET, POST
 Access-Control-Allow-Headers  Content-Type
 ```
@@ -575,7 +575,7 @@ With two dependencies the attack surface is minimal. govulncheck scans both agai
    Browser navigates to /room/WOLF-BEAR-4821
 
 2. Host enters name, clicks Join
-   WebSocket opens → wss://watchparty.app/ws/WOLF-BEAR-4821
+   WebSocket opens → wss://syncoplex.app/ws/WOLF-BEAR-4821
    Origin header validated ← rejected here if not your frontend
    Member count checked    ← 403 if room full (never happens for host)
    Sends: { type: "join", payload: { name: "Host" } }
