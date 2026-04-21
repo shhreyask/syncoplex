@@ -26,12 +26,13 @@ func newUpgrader(allowedOrigin string) websocket.Upgrader {
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 type Client struct {
-	userId   string
-	name     string
-	roomCode string
-	conn     *websocket.Conn
-	send     chan []byte
-	hub      *Hub
+	userId       string
+	name         string
+	roomCode     string
+	sessionToken string // held in memory; written to Redis only on disconnect
+	conn         *websocket.Conn
+	send         chan []byte
+	hub          *Hub
 }
 
 type Message struct {
@@ -43,6 +44,7 @@ type Message struct {
 type Hub struct {
 	rooms      map[string]map[string]*Client // roomCode → userId → *Client
 	hostIds    map[string]string             // roomCode → userId (current host)
+	rdb        *redis.Client                 // needed for session writes on drop
 	register   chan *Client
 	unregister chan *Client
 	broadcast  chan *Message
@@ -63,29 +65,30 @@ func makeEnvelope(msgType string, payload interface{}) []byte {
 
 // ── Hub Constructor ───────────────────────────────────────────────────────────
 
-func newHub() *Hub {
+func newHub(rdb *redis.Client) *Hub {
 	return &Hub{
 		rooms:      make(map[string]map[string]*Client),
 		hostIds:    make(map[string]string),
+		rdb:        rdb,
 		register:   make(chan *Client),
 		unregister: make(chan *Client),
 		broadcast:  make(chan *Message, 256),
 	}
 }
 
-// ── Hub Run Loop ──────────────────────────────────────���───────────────────────
+// ── Hub Run Loop ──────────────────────────────────────────────────────────────
 //
 // Single goroutine. Owns rooms and hostIds maps exclusively.
 // Nothing else ever reads or writes these maps.
 
-func (h *Hub) run(rdb *redis.Client) {
+func (h *Hub) run() {
 	for {
 		select {
 		case client := <-h.register:
-			h.handleRegister(client, rdb)
+			h.handleRegister(client)
 
 		case client := <-h.unregister:
-			h.handleUnregister(client, rdb)
+			h.handleUnregister(client)
 
 		case msg := <-h.broadcast:
 			h.handleBroadcast(msg)
@@ -95,7 +98,7 @@ func (h *Hub) run(rdb *redis.Client) {
 
 // ── Register ──────────────────────────────────────────────────────────────────
 
-func (h *Hub) handleRegister(client *Client, rdb *redis.Client) {
+func (h *Hub) handleRegister(client *Client) {
 	ctx := context.Background()
 
 	// Initialise room map if first member
@@ -110,11 +113,11 @@ func (h *Hub) handleRegister(client *Client, rdb *redis.Client) {
 	// First member becomes host — overwrite the Redis "pending" placeholder
 	if len(room) == 1 {
 		h.hostIds[client.roomCode] = client.userId
-		rdb.HSet(ctx, "room:"+client.roomCode, "hostId", client.userId)
+		h.rdb.HSet(ctx, "room:"+client.roomCode, "hostId", client.userId)
 	}
 
 	// Reset room TTL on join
-	resetRoomTTL(ctx, rdb, client.roomCode)
+	resetRoomTTL(ctx, h.rdb, client.roomCode)
 
 	// Send session_init immediately
 	client.send <- makeEnvelope("session_init", map[string]string{
@@ -151,7 +154,7 @@ func (h *Hub) handleRegister(client *Client, rdb *redis.Client) {
 
 // ── Unregister ────────────────────────────────────────────────────────────────
 
-func (h *Hub) handleUnregister(client *Client, rdb *redis.Client) {
+func (h *Hub) handleUnregister(client *Client) {
 	ctx := context.Background()
 	room, ok := h.rooms[client.roomCode]
 	if !ok {
@@ -164,11 +167,15 @@ func (h *Hub) handleUnregister(client *Client, rdb *redis.Client) {
 		return
 	}
 
+	// Write session to Redis NOW — this is when the reconnect clock starts.
+	// The token was held in memory since connect; only at disconnect does it matter.
+	writeSessionOnDisconnect(ctx, h.rdb, client)
+
 	delete(room, client.userId)
 	close(client.send)
 
 	// Reset TTL on leave
-	resetRoomTTL(ctx, rdb, client.roomCode)
+	resetRoomTTL(ctx, h.rdb, client.roomCode)
 
 	// Broadcast user_left before host migration so clients process in order
 	h.broadcastToRoom(client.roomCode, makeEnvelope("user_left", map[string]string{
@@ -180,7 +187,7 @@ func (h *Hub) handleUnregister(client *Client, rdb *redis.Client) {
 	if client.userId == h.hostIds[client.roomCode] && len(room) > 0 {
 		for _, next := range room {
 			h.hostIds[client.roomCode] = next.userId
-			rdb.HSet(ctx, "room:"+client.roomCode, "hostId", next.userId)
+			h.rdb.HSet(ctx, "room:"+client.roomCode, "hostId", next.userId)
 			h.broadcastToRoom(client.roomCode, makeEnvelope("host_changed", map[string]string{
 				"userId": next.userId,
 				"name":   next.name,
@@ -211,7 +218,9 @@ func (h *Hub) handleBroadcast(msg *Message) {
 		case client.send <- msg.data:
 			// Delivered to buffer — Hub moves on immediately
 		default:
-			// Buffer full — client is too slow or dead — drop it
+			// Buffer full — client is too slow or dead — drop it.
+			// Write session now since handleUnregister will never be called for this client.
+			writeSessionOnDisconnect(context.Background(), h.rdb, client)
 			close(client.send)
 			delete(room, client.userId)
 		}
@@ -229,6 +238,7 @@ func (h *Hub) broadcastToRoom(roomCode string, data []byte) {
 		select {
 		case client.send <- data:
 		default:
+			writeSessionOnDisconnect(context.Background(), h.rdb, client)
 			close(client.send)
 			delete(room, client.userId)
 		}
@@ -247,9 +257,30 @@ func (h *Hub) broadcastToOthers(roomCode, excludeUserId string, data []byte) {
 		select {
 		case client.send <- data:
 		default:
+			writeSessionOnDisconnect(context.Background(), h.rdb, client)
 			close(client.send)
 			delete(room, client.userId)
 		}
+	}
+}
+
+// ── Session Write on Disconnect ───────��───────────────────────────────────────
+//
+// Called in handleUnregister and in every broadcast drop path.
+// This is the single place where a session token is written to Redis —
+// only when the client actually disconnects, starting the reconnect TTL clock.
+
+func writeSessionOnDisconnect(ctx context.Context, rdb *redis.Client, client *Client) {
+	if client.sessionToken == "" {
+		return
+	}
+	s := Session{
+		UserID:   client.userId,
+		Name:     client.name,
+		RoomCode: client.roomCode,
+	}
+	if err := storeSession(ctx, rdb, client.sessionToken, s); err != nil {
+		log.Printf("hub: failed to write session on disconnect for %s — %v", client.userId, err)
 	}
 }
 
@@ -270,13 +301,13 @@ func (h *Hub) roomMemberCount(roomCode string) int {
 
 // ── TTL Heartbeat ─────────────────────────────────────────────────────────────
 
-func (h *Hub) ttlHeartbeat(rdb *redis.Client) {
+func (h *Hub) ttlHeartbeat() {
 	ticker := time.NewTicker(30 * time.Minute)
 	for range ticker.C {
 		ctx := context.Background()
 		for roomCode, room := range h.rooms {
 			if len(room) > 0 {
-				if err := rdb.Expire(ctx, "room:"+roomCode, RoomTTL*time.Second).Err(); err != nil {
+				if err := h.rdb.Expire(ctx, "room:"+roomCode, RoomTTL*time.Second).Err(); err != nil {
 					log.Printf("hub: TTL heartbeat failed for room %s — %v", roomCode, err)
 				}
 			}
@@ -375,7 +406,7 @@ func handleWebSocket(hub *Hub, rdb *redis.Client, upgrader websocket.Upgrader) h
 				log.Printf("hub: session retrieve error — %v", err)
 			}
 			if session != nil && session.RoomCode == code {
-				// Valid reconnect
+				// Valid reconnect — restore identity, hold new token in memory
 				userID = session.UserID
 				sessionToken = newToken
 				name = session.Name // always restore original name
@@ -383,8 +414,8 @@ func handleWebSocket(hub *Hub, rdb *redis.Client, upgrader websocket.Upgrader) h
 		}
 
 		if userID == "" {
-			// Fresh join
-			uid, token, err := newSession(ctx, rdb, name, code)
+			// Fresh join — generate identity and token
+			uid, token, err := newSession(name, code)
 			if err != nil {
 				log.Printf("hub: session create error — %v", err)
 				conn.WriteMessage(websocket.TextMessage,
@@ -400,12 +431,13 @@ func handleWebSocket(hub *Hub, rdb *redis.Client, upgrader websocket.Upgrader) h
 		}
 
 		client := &Client{
-			userId:   userID,
-			name:     name,
-			roomCode: code,
-			conn:     conn,
-			send:     make(chan []byte, SendBufferSize),
-			hub:      hub,
+			userId:       userID,
+			name:         name,
+			roomCode:     code,
+			sessionToken: sessionToken, // held in memory until disconnect
+			conn:         conn,
+			send:         make(chan []byte, SendBufferSize),
+			hub:          hub,
 		}
 
 		// Send session token to client before registering with Hub

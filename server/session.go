@@ -92,7 +92,7 @@ func retrieveSession(ctx context.Context, rdb *redis.Client, token string) (*Ses
 // Called on every fresh connect (no token, or expired token).
 // Returns the userId and sessionToken to send back to the client.
 
-func newSession(ctx context.Context, rdb *redis.Client, name, roomCode string) (string, string, error) {
+func newSession(name, roomCode string) (string, string, error) {
 	userID, err := generateUserID()
 	if err != nil {
 		return "", "", err
@@ -100,16 +100,6 @@ func newSession(ctx context.Context, rdb *redis.Client, name, roomCode string) (
 
 	token, err := generateToken()
 	if err != nil {
-		return "", "", err
-	}
-
-	s := Session{
-		UserID:   userID,
-		Name:     name,
-		RoomCode: roomCode,
-	}
-
-	if err := storeSession(ctx, rdb, token, s); err != nil {
 		return "", "", err
 	}
 
@@ -135,10 +125,6 @@ func reconnectSession(ctx context.Context, rdb *redis.Client, token string) (*Se
 	// Issue a new token for the next reconnect window
 	newToken, err := generateToken()
 	if err != nil {
-		return nil, "", err
-	}
-
-	if err := storeSession(ctx, rdb, newToken, *s); err != nil {
 		return nil, "", err
 	}
 

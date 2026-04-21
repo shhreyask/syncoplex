@@ -9,7 +9,7 @@ import (
 const (
 	MaxRoomMembers  = 6
 	RoomTTL         = 6 * 60 * 60 // 6 hours in seconds
-	SessionTTL      = 30           // 30 seconds in seconds
+	SessionTTL      = 5 * 60      // 5 minutes in seconds
 	MaxMessageSize  = 4096         // 4KB
 	WriteWait       = 10           // seconds — write deadline per message
 	PongWait        = 60           // seconds — max silence before drop

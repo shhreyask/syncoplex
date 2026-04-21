@@ -16,9 +16,9 @@ func main() {
 
 	rdb := newRedisClient(cfg)
 
-	hub := newHub()
-	go hub.run(rdb)
-	go hub.ttlHeartbeat(rdb)
+	hub := newHub(rdb)
+	go hub.run()
+	go hub.ttlHeartbeat()
 
 	upgrader := newUpgrader(cfg.AllowedOrigin)
 
