@@ -41,6 +41,11 @@ type Message struct {
 	data         []byte
 }
 
+type CountRequest struct {
+	roomCode     string
+	resp 		 chan int
+}
+
 type Hub struct {
 	rooms      map[string]map[string]*Client // roomCode → userId → *Client
 	hostIds    map[string]string             // roomCode → userId (current host)
@@ -48,6 +53,7 @@ type Hub struct {
 	register   chan *Client
 	unregister chan *Client
 	broadcast  chan *Message
+	countQuery chan CountRequest
 }
 
 // ── Envelope ──────────────────────────────────────────────────────────────────
@@ -73,6 +79,7 @@ func newHub(rdb *redis.Client) *Hub {
 		register:   make(chan *Client),
 		unregister: make(chan *Client),
 		broadcast:  make(chan *Message, 256),
+		countQuery: make(chan CountRequest),
 	}
 }
 
@@ -82,6 +89,8 @@ func newHub(rdb *redis.Client) *Hub {
 // Nothing else ever reads or writes these maps.
 
 func (h *Hub) run() {
+	ticker := time.NewTicker(30 * time.Minute)
+	defer ticker.Stop()
 	for {
 		select {
 		case client := <-h.register:
@@ -92,6 +101,12 @@ func (h *Hub) run() {
 
 		case msg := <-h.broadcast:
 			h.handleBroadcast(msg)
+
+		case <-ticker.C:
+			h.handleHeartbeat()
+
+		case req := <-h.countQuery:
+			req.resp <- len(h.rooms[req.roomCode])
 		}
 	}
 }
@@ -285,32 +300,24 @@ func writeSessionOnDisconnect(ctx context.Context, rdb *redis.Client, client *Cl
 	}
 }
 
-// ── Room Member Count (called from rooms.go) ──────────────────────────────────
+// ── Room Member Count ──────────────────────────────────
 //
 // This is the only public-facing read of the rooms map.
-// It is NOT called from the Hub goroutine — it reads the map from outside.
-// Safe at Step 1 scale; a channel-based query can replace this in future steps
-// if contention becomes measurable.
 
 func (h *Hub) roomMemberCount(roomCode string) int {
-	room, ok := h.rooms[roomCode]
-	if !ok {
-		return 0
-	}
-	return len(room)
+	resp := make(chan int, 1)
+	h.countQuery <- CountRequest{roomCode: roomCode, resp: resp}
+	return <-resp
 }
 
 // ── TTL Heartbeat ─────────────────────────────────────────────────────────────
 
-func (h *Hub) ttlHeartbeat() {
-	ticker := time.NewTicker(30 * time.Minute)
-	for range ticker.C {
-		ctx := context.Background()
-		for roomCode, room := range h.rooms {
-			if len(room) > 0 {
-				if err := h.rdb.Expire(ctx, "room:"+roomCode, RoomTTL*time.Second).Err(); err != nil {
-					log.Printf("hub: TTL heartbeat failed for room %s — %v", roomCode, err)
-				}
+func (h *Hub) handleHeartbeat() {
+	ctx := context.Background()
+	for roomCode, room := range h.rooms {
+		if len(room) > 0 {
+			if err := h.rdb.Expire(ctx, "room:"+roomCode, RoomTTL*time.Second).Err(); err != nil {
+				log.Printf("hub: TTL heartbeat failed for room %s — %v", roomCode, err)
 			}
 		}
 	}

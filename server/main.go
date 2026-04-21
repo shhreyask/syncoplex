@@ -18,7 +18,6 @@ func main() {
 
 	hub := newHub(rdb)
 	go hub.run()
-	go hub.ttlHeartbeat()
 
 	upgrader := newUpgrader(cfg.AllowedOrigin)
 

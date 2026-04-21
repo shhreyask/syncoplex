@@ -142,16 +142,15 @@ The session token is intentionally **not** written to Redis on connect. It only 
 ### The Heartbeat
 
 ```go
-// One goroutine, runs for the lifetime of the server
-func (h *Hub) ttlHeartbeat() {
-    ticker := time.NewTicker(30 * time.Minute)
-    for range ticker.C {
-        for roomCode, room := range h.rooms {
-            if len(room) > 0 {
-                h.rdb.Expire(ctx, "room:"+roomCode, 6*time.Hour)
-            }
-        }
-    }
+func (h *Hub) handleHeartbeat() {
+	ctx := context.Background()
+	for roomCode, room := range h.rooms {
+		if len(room) > 0 {
+			if err := h.rdb.Expire(ctx, "room:"+roomCode, RoomTTL*time.Second).Err(); err != nil {
+				log.Printf("hub: TTL heartbeat failed for room %s — %v", roomCode, err)
+			}
+		}
+	}
 }
 ```
 
@@ -358,13 +357,19 @@ type Message struct {
     data         []byte
 }
 
+type CountRequest struct {
+	roomCode     string
+	resp 		 chan int
+}
+
 type Hub struct {
-    rooms        map[string]map[string]*Client   // roomCode → userId → *Client
-    hostIds      map[string]string               // roomCode → userId (current host)
-    rdb          *redis.Client                   // for session writes on disconnect/drop
-    register     chan *Client
-    unregister   chan *Client
-    broadcast    chan *Message
+	rooms      map[string]map[string]*Client // roomCode → userId → *Client
+	hostIds    map[string]string             // roomCode → userId (current host)
+	rdb        *redis.Client                 // needed for session writes on drop
+	register   chan *Client
+	unregister chan *Client
+	broadcast  chan *Message
+	countQuery chan CountRequest
 }
 ```
 
@@ -437,7 +442,7 @@ If the write deadline is exceeded the connection is dropped. The Hub already mov
 Hub goroutine                               = 1 goroutine
 TTL heartbeat goroutine                     = 1 goroutine
 
-Total goroutines at 100 rooms              = 802
+Total goroutines at 100 rooms              = 801
 Total goroutine memory                     = ~3.2MB
 ```
 
