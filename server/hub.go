@@ -200,7 +200,7 @@ func (h *Hub) handleUnregister(client *Client) {
 	if len(room) == 0 {
 		delete(h.rooms, client.roomCode)
 		delete(h.hostIds, client.roomCode)
-		h.rdb.Expire(ctx, "room"+client.roomCode, 5*time.Minute)
+		h.rdb.Expire(ctx, "room:"+client.roomCode, 5*time.Minute)
 	}
 }
 
