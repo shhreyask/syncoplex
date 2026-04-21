@@ -101,7 +101,7 @@ The Hub is the sole source of truth for live membership. Redis never tracks who 
 
 ```
 room:{code}     Hash    { hostId, createdAt, status }
-session:{token} String  { userId, name, roomCode }    TTL: 30 seconds
+session:{token} String  { userId, name, roomCode }    TTL: 5 minutes
 ```
 
 The `room:{code}:members` Set from the original design is **removed entirely.** Redis does not track live membership.
@@ -124,24 +124,31 @@ maxmemory-policy allkeys-lru
 room:{code}        6 hour TTL
                    Reset ONLY on: user join, user leave, 30-minute heartbeat
                    Never reset on relay messages — those are high frequency
+                   Collapses to 5 minute TTL after a room empties so there 
+                   are no dangling rooms
 
-session:{token}    30 second TTL
-                   Short window for reconnection claim
-                   Expires automatically, no cleanup needed
+session:{token}    5 minute TTL
+                   Written to Redis only when the client disconnects — this is
+                   when the reconnect window actually opens. The token is held
+                   in memory on the Client struct while the connection is live
+                   and never touches Redis until the Hub unregisters the client.
+                   Expires automatically, no cleanup needed.
 ```
 
 Resetting TTL on every relay message at 30 messages/second/connection would mean thousands of unnecessary Redis round trips per minute. TTL is a lifecycle signal, not an activity ping.
+
+The session token is intentionally **not** written to Redis on connect. It only needs to exist during the window after a disconnect, so writing it earlier would be wasteful and misleading. The clock starts when it matters — at the moment of disconnect.
 
 ### The Heartbeat
 
 ```go
 // One goroutine, runs for the lifetime of the server
-func (h *Hub) ttlHeartbeat(rdb *redis.Client) {
+func (h *Hub) ttlHeartbeat() {
     ticker := time.NewTicker(30 * time.Minute)
     for range ticker.C {
         for roomCode, room := range h.rooms {
             if len(room) > 0 {
-                rdb.Expire(ctx, "room:"+roomCode, 6*time.Hour)
+                h.rdb.Expire(ctx, "room:"+roomCode, 6*time.Hour)
             }
         }
     }
@@ -224,8 +231,8 @@ Server generates:
     userId        = UUID v4  (stable identity for this session)
     sessionToken  = crypto/rand 32 bytes, hex encoded  (proves identity on reconnect)
 
-Server stores in Redis:
-    session:{token} → { userId, name, roomCode }   TTL: 30 seconds
+Token is held in memory on the Client struct.
+It is NOT written to Redis yet — there is nothing to reconnect to while connected.
 
 Server sends two messages to client immediately, in this order:
 
@@ -240,7 +247,20 @@ Client stores sessionToken in sessionStorage
 
 The token is sent before Hub registration so the client has it before the first room event (`user_joined`, `room_state`) could trigger a reconnect attempt.
 
-**Reconnect (within 30 seconds):**
+**On Disconnect:**
+```
+Hub calls handleUnregister(client)
+    │
+    ▼
+session:{token} → { userId, name, roomCode }  written to Redis with 5 min TTL
+    │
+    ▼
+The reconnect clock starts here — not at connect time.
+```
+
+This is also handled for the edge case where a client is evicted from the broadcast loop due to a full send buffer — `writeSessionOnDisconnect` is called in every drop path, so the token always reaches Redis regardless of how the client exits.
+
+**Reconnect (within 5 minutes):**
 ```
 Client reconnects, sends token in first message:
     { type: "join", payload: { name: "Alice", sessionToken: "abc123..." } }
@@ -250,7 +270,7 @@ Server checks Redis: session:{token} exists?
     │
     ├── YES → restore userId, name, roomCode
     │         token is deleted immediately (one-time use)
-    │         a fresh token is issued for the next reconnect window
+    │         a fresh token is issued and held in memory on the new Client
     │         user rejoins as same identity
     │         broadcast { type: "user_reconnected" } — not user_joined
     │         peer connections in Step 5 survive intact
@@ -287,13 +307,17 @@ Step 3 adds sync commands. "Who controls playback" needs a clear answer before t
 ```go
 func (h *Hub) handleUnregister(client *Client) {
     room := h.rooms[client.roomCode]
+
+    // Write session to Redis — reconnect window opens now
+    writeSessionOnDisconnect(ctx, h.rdb, client)
+
     delete(room, client.userId)
 
-    if client.userId == h.getRoomHost(client.roomCode) {
+    if client.userId == h.hostIds[client.roomCode] {
         if len(room) > 0 {
             // Migrate to first remaining member
             for _, next := range room {
-                rdb.HSet(ctx, "room:"+client.roomCode, "hostId", next.userId)
+                h.rdb.HSet(ctx, "room:"+client.roomCode, "hostId", next.userId)
                 h.broadcastToRoom(client.roomCode, HostChangedMessage(next.userId))
                 break
             }
@@ -322,6 +346,7 @@ type Client struct {
     userId       string
     name         string
     roomCode     string
+    sessionToken string          // held in memory; written to Redis only on disconnect
     conn         *websocket.Conn
     send         chan []byte      // buffered — Hub never blocks on this client
     hub          *Hub
@@ -336,6 +361,7 @@ type Message struct {
 type Hub struct {
     rooms        map[string]map[string]*Client   // roomCode → userId → *Client
     hostIds      map[string]string               // roomCode → userId (current host)
+    rdb          *redis.Client                   // for session writes on disconnect/drop
     register     chan *Client
     unregister   chan *Client
     broadcast    chan *Message
@@ -378,7 +404,8 @@ case msg := <-h.broadcast:
                 // Delivered to buffer — Hub moves on immediately
             default:
                 // Buffer full — client is too slow or dead
-                // Drop the client, never stall the Hub
+                // Write session before dropping so the reconnect window still opens
+                writeSessionOnDisconnect(context.Background(), h.rdb, client)
                 close(client.send)
                 delete(room, client.userId)
             }
@@ -600,7 +627,7 @@ With three dependencies the attack surface remains minimal. govulncheck scans al
 
    Server:
    Generates userId + sessionToken
-   Stores session:{token} in Redis (30s TTL)
+   Token held in memory on Client struct — NOT written to Redis yet
    Sends: { type: "session_token", payload: { sessionToken } }  ← before Hub registration
    Registers with Hub
    Redis: hostId updated from "pending" to real userId
@@ -619,6 +646,7 @@ With three dependencies the attack surface remains minimal. govulncheck scans al
 
    Server:
    Generates userId + sessionToken
+   Token held in memory — NOT written to Redis yet
    Sends: { type: "session_token", payload: { sessionToken } }  ← before Hub registration
    Registers Alice with Hub
    Sends Alice: { type: "session_init", payload: { userId } }
@@ -627,15 +655,15 @@ With three dependencies the attack surface remains minimal. govulncheck scans al
 
 5. Alice's network blips — tab briefly disconnects
    Hub unregisters Alice
+   HERE: session:{token} written to Redis with 5 min TTL ← reconnect clock starts now
    Broadcasts: { type: "user_left", payload: { userId: alice-uuid } }
-   Redis: session:{token} set with 30s TTL during disconnect
 
    Alice's browser reconnects automatically (client-side retry)
    Sends: { type: "join", payload: { name: "Alice", sessionToken: "abc..." } }
 
    Server finds session in Redis — token valid:
    Token deleted immediately (one-time use)
-   Fresh token issued for next reconnect window
+   Fresh token issued, held in memory on new Client struct
    Restores alice-uuid as userId
    Sends: { type: "session_token", payload: { newSessionToken } }
    Re-registers with Hub under same userId
@@ -644,6 +672,7 @@ With three dependencies the attack surface remains minimal. govulncheck scans al
 
 6. Host closes tab
    Hub unregisters host
+   session:{token} written to Redis with 5 min TTL
    Host migration: next member becomes host
    Redis: hostId updated
    Broadcasts: { type: "host_changed", payload: { userId: alice-uuid } }
@@ -651,7 +680,7 @@ With three dependencies the attack surface remains minimal. govulncheck scans al
 
 7. Last person leaves
    Hub: room entry deleted from in-memory map
-   Redis: room:{code} key left to expire naturally via TTL
+   Redis: room:{code} TTL collapsed to 5 minutes
 ```
 
 ---
@@ -691,12 +720,13 @@ A $5/mo VPS with 512MB RAM could run thousands of concurrent rooms.
 ### Redis Call Frequency
 
 ```
-Per join/leave event    3 Redis calls    (room exists check, session write, TTL reset)
+Per join event          2 Redis calls    (room exists check, TTL reset)
+Per leave/disconnect    2 Redis calls    (session write, TTL reset)
 Per relay message       0 Redis calls    ← server never touches Redis for relay
 Every 30 minutes        N Redis calls    (N = number of active rooms, heartbeat only)
 ```
 
-The server is almost entirely in-memory during active sessions. Redis is consulted at the edges — join, leave, reconnect — never in the hot path.
+The server is almost entirely in-memory during active sessions. Redis is consulted at the edges — join, leave, reconnect — never in the hot path. Session tokens no longer add a Redis write on connect, only on disconnect.
 
 ---
 
@@ -714,6 +744,7 @@ The server is almost entirely in-memory during active sessions. Redis is consult
 | Write to WebSocket connections directly from Hub | Write loops handle that — Hub never blocks |
 | Use a web framework | net/http stdlib is sufficient — no framework overhead |
 | Expose Redis to the network | localhost only, always |
+| Write session token to Redis on connect | Token only matters after disconnect — writing it on connect wastes a Redis call and starts the TTL clock at the wrong time |
 
 Each omission is a feature. Everything the server does not do is something that cannot go wrong, cannot cost money, and cannot slow the user down.
 

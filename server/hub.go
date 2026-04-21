@@ -196,10 +196,11 @@ func (h *Hub) handleUnregister(client *Client) {
 		}
 	}
 
-	// Room is empty — clean up in-memory, let Redis TTL expire the key
+	// Room is empty — clean up in-memory, let Redis TTL expire the key after 5 minutes
 	if len(room) == 0 {
 		delete(h.rooms, client.roomCode)
 		delete(h.hostIds, client.roomCode)
+		h.rdb.Expire(ctx, "room"+client.roomCode, 5*time.Minute)
 	}
 }
 
