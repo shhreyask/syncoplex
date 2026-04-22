@@ -147,13 +147,13 @@ func validRoomCode(code string) bool {
 }
 
 func sanitizeName(name string) string {
-	// Strip all HTML tags
-	name = regexp.MustCompile(`<[^>]*>`).ReplaceAllString(name, "")
-	// Collapse whitespace
-	name = strings.TrimSpace(name)
-	// Cap at MaxNameLength
-	if len(name) > MaxNameLength {
-		name = name[:MaxNameLength]
-	}
-	return name
+    name = regexp.MustCompile(`<[^>]*>`).ReplaceAllString(name, "")
+    name = strings.TrimSpace(name)
+    runes := []rune(name)
+    if len(runes) > MaxNameLength {
+        name = string(runes[:MaxNameLength])
+    } else {
+        name = string(runes)
+    }
+    return name
 }
