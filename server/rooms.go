@@ -26,10 +26,9 @@ var animals = []string{
 // ── Code Generation ───────────────────────────────────────────────────────────
 
 func generateRoomCode() string {
-	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-	word1 := animals[rng.Intn(len(animals))]
-	word2 := animals[rng.Intn(len(animals))]
-	digits := rng.Intn(900000) + 100000 // always 6 digits
+	word1 := animals[rand.Intn(len(animals))]
+	word2 := animals[rand.Intn(len(animals))]
+	digits := rand.Intn(900000) + 100000 // always 6 digits
 	return fmt.Sprintf("%s-%s-%d", word1, word2, digits)
 }
 
