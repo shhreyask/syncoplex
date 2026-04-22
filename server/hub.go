@@ -170,7 +170,6 @@ func (h *Hub) handleRegister(client *Client) {
 // ── Unregister ────────────────────────────────────────────────────────────────
 
 func (h *Hub) handleUnregister(client *Client) {
-	ctx := context.Background()
 	room, ok := h.rooms[client.roomCode]
 	if !ok {
 		return
@@ -182,6 +181,86 @@ func (h *Hub) handleUnregister(client *Client) {
 		return
 	}
 
+	h.dropClient(room, client)
+}
+
+// ── Broadcast ─────────────────────────────────────────────────────────────────
+
+func (h *Hub) handleBroadcast(msg *Message) {
+	room, ok := h.rooms[msg.roomCode]
+	if !ok {
+		return
+	}
+	for _, client := range room {
+		if client.userId == msg.senderUserId {
+			continue // never echo back to sender
+		}
+		select {
+		case client.send <- msg.data:
+			// Delivered to buffer — Hub moves on immediately
+		default:
+			// Buffer full — client is too slow or dead — drop it.
+			// Write session now since handleUnregister will never be called for this client.
+			h.dropClient(room, client)
+		}
+	}
+}
+
+// ── Broadcast Helpers ─────────────────────────────────────────────────────────
+
+func (h *Hub) broadcastToRoom(roomCode string, data []byte) {
+	room, ok := h.rooms[roomCode]
+	if !ok {
+		return
+	}
+	for _, client := range room {
+		select {
+		case client.send <- data:
+		default:
+			h.dropClient(room, client)
+		}
+	}
+}
+
+func (h *Hub) broadcastToOthers(roomCode, excludeUserId string, data []byte) {
+	room, ok := h.rooms[roomCode]
+	if !ok {
+		return
+	}
+	for _, client := range room {
+		if client.userId == excludeUserId {
+			continue
+		}
+		select {
+		case client.send <- data:
+		default:
+			h.dropClient(room, client)
+		}
+	}
+}
+
+// ── Session Write on Disconnect ───────��───────────────────────────────────────
+//
+// Called in handleUnregister and in every broadcast drop path.
+// This is the single place where a session token is written to Redis —
+// only when the client actually disconnects, starting the reconnect TTL clock.
+
+func writeSessionOnDisconnect(ctx context.Context, rdb *redis.Client, client *Client) {
+	if client.sessionToken == "" {
+		return
+	}
+	s := Session{
+		UserID:   client.userId,
+		Name:     client.name,
+		RoomCode: client.roomCode,
+	}
+	if err := storeSession(ctx, rdb, client.sessionToken, s); err != nil {
+		log.Printf("hub: failed to write session on disconnect for %s — %v", client.userId, err)
+	}
+}
+
+func (h *Hub) dropClient(room map[string]*Client, client *Client) {
+	ctx := context.Background()
 	// Write session to Redis NOW — this is when the reconnect clock starts.
 	// The token was held in memory since connect; only at disconnect does it matter.
 	writeSessionOnDisconnect(ctx, h.rdb, client)
@@ -216,87 +295,6 @@ func (h *Hub) handleUnregister(client *Client) {
 		delete(h.rooms, client.roomCode)
 		delete(h.hostIds, client.roomCode)
 		h.rdb.Expire(ctx, "room:"+client.roomCode, 5*time.Minute)
-	}
-}
-
-// ── Broadcast ─────────────────────────────────────────────────────────────────
-
-func (h *Hub) handleBroadcast(msg *Message) {
-	room, ok := h.rooms[msg.roomCode]
-	if !ok {
-		return
-	}
-	for _, client := range room {
-		if client.userId == msg.senderUserId {
-			continue // never echo back to sender
-		}
-		select {
-		case client.send <- msg.data:
-			// Delivered to buffer — Hub moves on immediately
-		default:
-			// Buffer full — client is too slow or dead — drop it.
-			// Write session now since handleUnregister will never be called for this client.
-			writeSessionOnDisconnect(context.Background(), h.rdb, client)
-			close(client.send)
-			delete(room, client.userId)
-		}
-	}
-}
-
-// ── Broadcast Helpers ─────────────────────────────────────────────────────────
-
-func (h *Hub) broadcastToRoom(roomCode string, data []byte) {
-	room, ok := h.rooms[roomCode]
-	if !ok {
-		return
-	}
-	for _, client := range room {
-		select {
-		case client.send <- data:
-		default:
-			writeSessionOnDisconnect(context.Background(), h.rdb, client)
-			close(client.send)
-			delete(room, client.userId)
-		}
-	}
-}
-
-func (h *Hub) broadcastToOthers(roomCode, excludeUserId string, data []byte) {
-	room, ok := h.rooms[roomCode]
-	if !ok {
-		return
-	}
-	for _, client := range room {
-		if client.userId == excludeUserId {
-			continue
-		}
-		select {
-		case client.send <- data:
-		default:
-			writeSessionOnDisconnect(context.Background(), h.rdb, client)
-			close(client.send)
-			delete(room, client.userId)
-		}
-	}
-}
-
-// ── Session Write on Disconnect ───────��───────────────────────────────────────
-//
-// Called in handleUnregister and in every broadcast drop path.
-// This is the single place where a session token is written to Redis —
-// only when the client actually disconnects, starting the reconnect TTL clock.
-
-func writeSessionOnDisconnect(ctx context.Context, rdb *redis.Client, client *Client) {
-	if client.sessionToken == "" {
-		return
-	}
-	s := Session{
-		UserID:   client.userId,
-		Name:     client.name,
-		RoomCode: client.roomCode,
-	}
-	if err := storeSession(ctx, rdb, client.sessionToken, s); err != nil {
-		log.Printf("hub: failed to write session on disconnect for %s — %v", client.userId, err)
 	}
 }
 
