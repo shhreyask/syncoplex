@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -42,19 +43,14 @@ type Message struct {
 	data         []byte
 }
 
-type CountRequest struct {
-	roomCode     string
-	resp 		 chan int
-}
-
 type Hub struct {
+	mu 		   sync.RWMutex
 	rooms      map[string]map[string]*Client // roomCode → userId → *Client
 	hostIds    map[string]string             // roomCode → userId (current host)
 	rdb        *redis.Client                 // needed for session writes on drop
 	register   chan *Client
 	unregister chan *Client
 	broadcast  chan *Message
-	countQuery chan CountRequest
 }
 
 // ── Envelope ──────────────────────────────────────────────────────────────────
@@ -80,7 +76,6 @@ func newHub(rdb *redis.Client) *Hub {
 		register:   make(chan *Client),
 		unregister: make(chan *Client),
 		broadcast:  make(chan *Message, 256),
-		countQuery: make(chan CountRequest),
 	}
 }
 
@@ -105,9 +100,6 @@ func (h *Hub) run() {
 
 		case <-ticker.C:
 			h.handleHeartbeat()
-
-		case req := <-h.countQuery:
-			req.resp <- len(h.rooms[req.roomCode])
 		}
 	}
 }
@@ -117,16 +109,38 @@ func (h *Hub) run() {
 func (h *Hub) handleRegister(client *Client) {
 	ctx := context.Background()
 
+	h.mu.Lock()
+
 	// Initialise room map if first member
 	if _, ok := h.rooms[client.roomCode]; !ok {
 		h.rooms[client.roomCode] = make(map[string]*Client)
 	}
 
 	room := h.rooms[client.roomCode]
+
+	// Authoritative cap check — atomic with the insert below.
+	// Reconnecting clients are exempt: they are reclaiming an existing slot.
+	if !client.isReconnect && len(room) >= MaxRoomMembers {
+		h.mu.Unlock()
+		client.conn.WriteMessage(websocket.TextMessage,
+			makeEnvelope("error", map[string]string{
+				"code":    "ROOM_FULL",
+				"message": "Room is full",
+			}))
+		close(client.send)
+		client.conn.Close()
+		return
+	}
+
 	room[client.userId] = client
 
+	isFirstMember := len(room) == 1
+
+	h.mu.Unlock()
+	// Lock released — all Redis calls and sends happen outside it.
+
 	// First member becomes host — overwrite the Redis "pending" placeholder
-	if len(room) == 1 {
+	if isFirstMember {
 		h.hostIds[client.roomCode] = client.userId
 		h.rdb.HSet(ctx, "room:"+client.roomCode, "hostId", client.userId)
 	}
@@ -303,9 +317,9 @@ func (h *Hub) dropClient(room map[string]*Client, client *Client) {
 // This is the only public-facing read of the rooms map.
 
 func (h *Hub) roomMemberCount(roomCode string) int {
-	resp := make(chan int, 1)
-	h.countQuery <- CountRequest{roomCode: roomCode, resp: resp}
-	return <-resp
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return len(h.rooms[roomCode])
 }
 
 // ── TTL Heartbeat ─────────────────────────────────────────────────────────────
