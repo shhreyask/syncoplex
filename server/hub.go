@@ -437,7 +437,7 @@ func handleWebSocket(hub *Hub, rdb *redis.Client, upgrader websocket.Upgrader) h
 
 		if userID == "" {
 			// Fresh join — generate identity and token
-			uid, token, err := newSession(name, code)
+			uid, token, err := newSession()
 			if err != nil {
 				log.Printf("hub: session create error — %v", err)
 				conn.WriteMessage(websocket.TextMessage,

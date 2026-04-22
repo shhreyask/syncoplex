@@ -92,7 +92,7 @@ func retrieveSession(ctx context.Context, rdb *redis.Client, token string) (*Ses
 // Called on every fresh connect (no token, or expired token).
 // Returns the userId and sessionToken to send back to the client.
 
-func newSession(name, roomCode string) (string, string, error) {
+func newSession() (string, string, error) {
 	userID, err := generateUserID()
 	if err != nil {
 		return "", "", err
