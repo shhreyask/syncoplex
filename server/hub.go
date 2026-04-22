@@ -30,6 +30,7 @@ type Client struct {
 	name         string
 	roomCode     string
 	sessionToken string // held in memory; written to Redis only on disconnect
+	isReconnect  bool
 	conn         *websocket.Conn
 	send         chan []byte
 	hub          *Hub
@@ -122,7 +123,6 @@ func (h *Hub) handleRegister(client *Client) {
 	}
 
 	room := h.rooms[client.roomCode]
-	_, isReconnect := room[client.userId]
 	room[client.userId] = client
 
 	// First member becomes host — overwrite the Redis "pending" placeholder
@@ -156,7 +156,7 @@ func (h *Hub) handleRegister(client *Client) {
 
 	// Broadcast to everyone else in the room
 	msg := makeEnvelope(func() string {
-		if isReconnect {
+		if client.isReconnect {
 			return "user_reconnected"
 		}
 		return "user_joined"
@@ -405,6 +405,7 @@ func handleWebSocket(hub *Hub, rdb *redis.Client, upgrader websocket.Upgrader) h
 
 		// Resolve identity — reconnect or fresh join
 		var userID, sessionToken string
+		var isReconnect bool
 
 		if joinPayload.SessionToken != "" {
 			session, newToken, err := reconnectSession(ctx, rdb, joinPayload.SessionToken)
@@ -416,6 +417,7 @@ func handleWebSocket(hub *Hub, rdb *redis.Client, upgrader websocket.Upgrader) h
 				userID = session.UserID
 				sessionToken = newToken
 				name = session.Name // always restore original name
+				isReconnect = true
 			}
 		}
 
@@ -441,6 +443,7 @@ func handleWebSocket(hub *Hub, rdb *redis.Client, upgrader websocket.Upgrader) h
 			name:         name,
 			roomCode:     code,
 			sessionToken: sessionToken, // held in memory until disconnect
+			isReconnect:  isReconnect,
 			conn:         conn,
 			send:         make(chan []byte, SendBufferSize),
 			hub:          hub,
