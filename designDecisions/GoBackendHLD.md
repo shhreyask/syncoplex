@@ -65,9 +65,9 @@ Each layer has one responsibility and never bleeds into another.
 server/
 ├── main.go           Starts the server, wires routes, connects Redis
 ├── config.go         Environment variables, constants, room cap
-├── redis.go          go-redis singleton, connection config
+├── redis.go          go-redis singleton, connection config, pool sizing
 ├── rooms.go          Code generation, Redis read/write, room validation
-├── hub.go            In-memory connection map, broadcast logic, host migration
+├── hub.go            In-memory connection map, broadcast logic, host migration, WebSocket handler, read/write pumps
 ├── session.go        Session token issuance, reconnect identity claims
 └── middleware.go     Rate limiting, security headers, CORS, input validation
 ```
@@ -118,20 +118,34 @@ requirepass {strong}    ← Password protected even on localhost
 maxmemory-policy allkeys-lru
 ```
 
+### Redis Connection Pool
+
+```go
+redis.NewClient(&redis.Options{
+    Addr:         cfg.RedisAddr,
+    Password:     cfg.RedisPassword,
+    DB:           0,
+    PoolSize:     10,   // one server process, keep it lean
+    MinIdleConns: 2,
+})
+```
+
+The pool is intentionally small. This is a single-process server; there is no need for a large pool.
+
 ### TTL Strategy
 
 ```
 room:{code}        6 hour TTL
                    Reset ONLY on: user join, user leave, 30-minute heartbeat
                    Never reset on relay messages — those are high frequency
-                   Collapses to 5 minute TTL after a room empties so there 
+                   Collapses to 5 minute TTL after a room empties so there
                    are no dangling rooms
 
 session:{token}    5 minute TTL
                    Written to Redis only when the client disconnects — this is
                    when the reconnect window actually opens. The token is held
                    in memory on the Client struct while the connection is live
-                   and never touches Redis until the Hub unregisters the client.
+                   and never touches Redis until the Hub drops the client.
                    Expires automatically, no cleanup needed.
 ```
 
@@ -143,14 +157,14 @@ The session token is intentionally **not** written to Redis on connect. It only 
 
 ```go
 func (h *Hub) handleHeartbeat() {
-	ctx := context.Background()
-	for roomCode, room := range h.rooms {
-		if len(room) > 0 {
-			if err := h.rdb.Expire(ctx, "room:"+roomCode, RoomTTL*time.Second).Err(); err != nil {
-				log.Printf("hub: TTL heartbeat failed for room %s — %v", roomCode, err)
-			}
-		}
-	}
+    ctx := context.Background()
+    for roomCode, room := range h.rooms {
+        if len(room) > 0 {
+            if err := h.rdb.Expire(ctx, "room:"+roomCode, RoomTTL*time.Second).Err(); err != nil {
+                log.Printf("hub: TTL heartbeat failed for room %s — %v", roomCode, err)
+            }
+        }
+    }
 }
 ```
 
@@ -199,18 +213,28 @@ In a full mesh every participant uploads directly to every other participant. At
 ```json
 { "exists": true, "memberCount": 4, "full": false }
 ```
-The frontend shows "Room is full" before attempting a WebSocket connection.
+The frontend shows "Room is full" before attempting a WebSocket connection. The member count is read from the Hub's live in-memory map — not from Redis.
 
 **Layer 2 — WebSocket upgrade handler:**
 ```go
 // Check BEFORE upgrading — reject at HTTP level
-if currentCount >= 6 {
+if hub.roomMemberCount(code) >= MaxRoomMembers {
     http.Error(w, "Room is full", http.StatusForbidden)
     return  // connection never established
 }
 ```
 
 A 403 at HTTP level is cheaper than establishing and immediately closing a WebSocket. The client gets a clear signal it can handle gracefully.
+
+**Layer 3 — Hub handleRegister (final backstop):**
+```go
+// Reconnecting clients are exempt — they are reclaiming an existing slot
+if !client.isReconnect && len(room) >= MaxRoomMembers {
+    // close and reject
+}
+```
+
+The cap is re-checked atomically with the insert inside the Hub goroutine. Reconnecting clients bypass this check because they are reclaiming a slot that already existed, not adding a new one.
 
 ---
 
@@ -233,13 +257,15 @@ Server generates:
 Token is held in memory on the Client struct.
 It is NOT written to Redis yet — there is nothing to reconnect to while connected.
 
-Server sends two messages to client immediately, in this order:
+Server sends session_token directly on the raw connection BEFORE registering with the Hub:
 
-    1. { type: "session_token", payload: { sessionToken } }
-       ← client stores this BEFORE any room events arrive
+    conn.WriteMessage → { type: "session_token", payload: { sessionToken } }
+    ← client stores this BEFORE any room events arrive
 
-    2. { type: "session_init", payload: { userId } }
-       ← client now knows its stable identity
+Then the client is registered with the Hub, which immediately sends:
+
+    client.send ← { type: "session_init", payload: { userId } }
+    client.send ← { type: "room_state", payload: { members: [...] } }
 
 Client stores sessionToken in sessionStorage
 ```
@@ -248,7 +274,7 @@ The token is sent before Hub registration so the client has it before the first 
 
 **On Disconnect:**
 ```
-Hub calls handleUnregister(client)
+Hub calls dropClient(client)
     │
     ▼
 session:{token} → { userId, name, roomCode }  written to Redis with 5 min TTL
@@ -270,6 +296,7 @@ Server checks Redis: session:{token} exists?
     ├── YES → restore userId, name, roomCode
     │         token is deleted immediately (one-time use)
     │         a fresh token is issued and held in memory on the new Client
+    │         isReconnect = true on the Client struct
     │         user rejoins as same identity
     │         broadcast { type: "user_reconnected" } — not user_joined
     │         peer connections in Step 5 survive intact
@@ -304,29 +331,48 @@ Step 3 adds sync commands. "Who controls playback" needs a clear answer before t
 - When the room empties, nothing is deleted — TTL handles cleanup
 
 ```go
-func (h *Hub) handleUnregister(client *Client) {
-    room := h.rooms[client.roomCode]
+func (h *Hub) dropClient(room map[string]*Client, client *Client) {
+    ctx := context.Background()
 
-    // Write session to Redis — reconnect window opens now
+    // Write session to Redis NOW — this is when the reconnect clock starts.
     writeSessionOnDisconnect(ctx, h.rdb, client)
 
     delete(room, client.userId)
+    close(client.send)
 
-    if client.userId == h.hostIds[client.roomCode] {
-        if len(room) > 0 {
-            // Migrate to first remaining member
-            for _, next := range room {
-                h.rdb.HSet(ctx, "room:"+client.roomCode, "hostId", next.userId)
-                h.broadcastToRoom(client.roomCode, HostChangedMessage(next.userId))
-                break
-            }
+    // Reset TTL on leave
+    resetRoomTTL(ctx, h.rdb, client.roomCode)
+
+    // Broadcast user_left FIRST — before host migration, so clients
+    // always process membership loss before any role change
+    h.broadcastToRoom(client.roomCode, makeEnvelope("user_left", map[string]string{
+        "userId": client.userId,
+        "name":   client.name,
+    }))
+
+    // Then host migration
+    if client.userId == h.hostIds[client.roomCode] && len(room) > 0 {
+        for _, next := range room {
+            h.hostIds[client.roomCode] = next.userId
+            h.rdb.HSet(ctx, "room:"+client.roomCode, "hostId", next.userId)
+            h.broadcastToRoom(client.roomCode, makeEnvelope("host_changed", map[string]string{
+                "userId": next.userId,
+                "name":   next.name,
+            }))
+            break
         }
-        // If room is empty — do nothing, let TTL expire it
     }
 
-    h.broadcastToRoom(client.roomCode, UserLeftMessage(client))
+    // Room is empty — clean up in-memory, collapse Redis TTL to 5 minutes
+    if len(room) == 0 {
+        delete(h.rooms, client.roomCode)
+        delete(h.hostIds, client.roomCode)
+        h.rdb.Expire(ctx, "room:"+client.roomCode, 5*time.Minute)
+    }
 }
 ```
+
+Note the ordering: `user_left` is always broadcast before `host_changed`. Clients receive membership updates before any role change.
 
 ---
 
@@ -334,9 +380,11 @@ func (h *Hub) handleUnregister(client *Client) {
 
 The Hub is the central nervous system of the server. It is the only thing that ever reads or writes the live connection map.
 
-### Why a Single Goroutine Instead of Locks
+### Why a Single Goroutine Instead of Locks (for the Hot Path)
 
-Shared mutable state protected by mutexes is a source of subtle production bugs — deadlocks, missed unlocks, lock contention under load. A single goroutine owning the map means only one thing ever touches it. Correctness by construction, not by careful locking.
+Shared mutable state protected by mutexes is a source of subtle production bugs — deadlocks, missed unlocks, lock contention under load. For the hot path (register, unregister, broadcast) the Hub goroutine owns the map exclusively with no locking needed. Correctness by construction.
+
+The one exception is `roomMemberCount`, which is called from HTTP handlers on their own goroutines and must read the map safely. A `sync.RWMutex` is used for this single read-only cross-goroutine path.
 
 ### Data Structures
 
@@ -346,6 +394,7 @@ type Client struct {
     name         string
     roomCode     string
     sessionToken string          // held in memory; written to Redis only on disconnect
+    isReconnect  bool            // true when this connect is reclaiming an existing identity
     conn         *websocket.Conn
     send         chan []byte      // buffered — Hub never blocks on this client
     hub          *Hub
@@ -357,21 +406,18 @@ type Message struct {
     data         []byte
 }
 
-type CountRequest struct {
-	roomCode     string
-	resp 		 chan int
-}
-
 type Hub struct {
-	rooms      map[string]map[string]*Client // roomCode → userId → *Client
-	hostIds    map[string]string             // roomCode → userId (current host)
-	rdb        *redis.Client                 // needed for session writes on drop
-	register   chan *Client
-	unregister chan *Client
-	broadcast  chan *Message
-	countQuery chan CountRequest
+    mu         sync.RWMutex
+    rooms      map[string]map[string]*Client // roomCode → userId → *Client
+    hostIds    map[string]string             // roomCode → userId (current host)
+    rdb        *redis.Client                 // needed for session writes on drop
+    register   chan *Client
+    unregister chan *Client
+    broadcast  chan *Message                  // buffered (256)
 }
 ```
+
+`countQuery` and a separate `CountRequest` type were considered but not implemented. Live member count for HTTP handlers is served via `roomMemberCount()` using `RLock` on the same mutex.
 
 ### Goroutine Topology
 
@@ -398,21 +444,21 @@ Per connected user (2 goroutines each):
 
 ### The Critical Broadcast Pattern
 
-The Hub **never writes to a WebSocket directly.** It only puts messages into each client's buffered send channel and moves on immediately:
+The Hub **never writes to a WebSocket directly.** It only puts messages into each client's buffered send channel and moves on immediately. Relay messages exclude the sender:
 
 ```go
 case msg := <-h.broadcast:
     if room, ok := h.rooms[msg.roomCode]; ok {
         for _, client := range room {
+            if client.userId == msg.senderUserId {
+                continue // never echo back to sender
+            }
             select {
             case client.send <- msg.data:
                 // Delivered to buffer — Hub moves on immediately
             default:
                 // Buffer full — client is too slow or dead
-                // Write session before dropping so the reconnect window still opens
-                writeSessionOnDisconnect(context.Background(), h.rdb, client)
-                close(client.send)
-                delete(room, client.userId)
+                h.dropClient(room, client)
             }
         }
     }
@@ -424,14 +470,36 @@ The per-client write loop drains the send channel at its own pace, independently
 
 ```go
 func (c *Client) writePump() {
+    defer c.conn.Close()
     for msg := range c.send {
-        c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+        c.conn.SetWriteDeadline(time.Now().Add(WriteWait * time.Second))
         c.conn.WriteMessage(websocket.TextMessage, msg)
     }
 }
 ```
 
 If the write deadline is exceeded the connection is dropped. The Hub already moved on.
+
+### The Stale Client Guard in handleUnregister
+
+When a client reconnects, the new `*Client` pointer replaces the old one in the room map before the old read pump goroutine finishes. Without a guard, the old pump's deferred `unregister <- c` would evict the newly registered client:
+
+```go
+func (h *Hub) handleUnregister(client *Client) {
+    room, ok := h.rooms[client.roomCode]
+    if !ok {
+        return
+    }
+    // Only unregister if this pointer is still the active one for this userId.
+    // A reconnect may have already replaced it.
+    if existing, exists := room[client.userId]; !exists || existing != client {
+        return
+    }
+    h.dropClient(room, client)
+}
+```
+
+This guards the reconnect race condition where the old read pump exits slightly after the new client has already registered.
 
 ### Goroutine and Memory Count at Scale
 
@@ -470,9 +538,9 @@ Client → Server:
     join                { name, sessionToken? }
 
 Server → Client:
-    session_token       { sessionToken }             ← sent first, before Hub registration
-    session_init        { userId }                   ← sent second, after Hub registration
-    room_state          { members: [{ userId, name }] }   ← sent immediately on join
+    session_token       { sessionToken }             ← sent on raw conn BEFORE Hub registration
+    session_init        { userId }                   ← sent via Hub after registration
+    room_state          { members: [{ userId, name }] }   ← sent immediately on join (excludes self)
     user_joined         { userId, name }
     user_left           { userId, name }
     user_reconnected    { userId, name }
@@ -480,9 +548,9 @@ Server → Client:
     error               { code, message }
 ```
 
-`session_token` is deliberately sent before `session_init` and before any room events. The client must have its reconnect token stored before it could ever need to use it.
+`session_token` is written directly to the WebSocket connection before the client is registered with the Hub. This ensures the client has its reconnect token before any room events (`user_joined`, `room_state`) arrive.
 
-`room_state` is sent to the joining user immediately after registration. Without it, Alice joins and has no idea Bob is already there until Bob does something. This is the detail most implementations miss.
+`room_state` is sent to the joining user immediately after registration. The member list excludes the joining user themselves — they know who they are from `session_init`. Without it, Alice joins and has no idea Bob is already there until Bob does something.
 
 ---
 
@@ -499,11 +567,16 @@ Room creation is a one-shot request/response — HTTP is exactly the right proto
 
 ### Middleware Stack — Every Request
 
+```go
+wrap := func(handler http.Handler, limiter *rateLimiter) http.Handler {
+    return securityHeaders(cors(cfg.AllowedOrigin)(limiter.middleware(handler)))
+}
+```
+
+Execution order for each incoming request:
+
 ```
 Incoming Request
-        │
-        ▼
-Rate Limiter              IP-based token bucket
         │
         ▼
 Security Headers          CSP, X-Frame-Options, nosniff, Referrer-Policy
@@ -512,13 +585,15 @@ Security Headers          CSP, X-Frame-Options, nosniff, Referrer-Policy
 CORS Validation           Only https://syncoplex.app — never wildcard
         │
         ▼
-Input Validation          Room codes regex-checked, names sanitized
+Rate Limiter              IP-based token bucket (per-route limits)
         │
         ▼
 Handler                   Business logic
 ```
 
-Security is not bolted on after — it is the first thing every request passes through.
+Security headers and CORS are outermost — they run first and are applied even to rejected requests.
+
+WebSocket connections (`/ws/:code`) go through security headers and CORS but do not have a per-connection HTTP rate limiter. The WebSocket rate-limit constant `RateWSMessages` is defined in config but enforcement at the message level is a Step 1 TODO — the current `readPump` processes all messages from a connection without per-message rate gating.
 
 ---
 
@@ -536,10 +611,14 @@ Go server          →  Speaks plain HTTP internally, never exposed directly
 ### WebSocket Origin Validation
 
 ```go
-var upgrader = websocket.Upgrader{
-    CheckOrigin: func(r *http.Request) bool {
-        return r.Header.Get("Origin") == "https://syncoplex.app"
-    },
+func newUpgrader(allowedOrigin string) websocket.Upgrader {
+    return websocket.Upgrader{
+        ReadBufferSize:  1024,
+        WriteBufferSize: 1024,
+        CheckOrigin: func(r *http.Request) bool {
+            return r.Header.Get("Origin") == allowedOrigin
+        },
+    }
 }
 ```
 
@@ -550,10 +629,10 @@ Any connection not originating from your frontend is rejected at the upgrade han
 Applied immediately on every WebSocket connection:
 
 ```go
-conn.SetReadLimit(4096)                                    // 4KB max message size
-conn.SetReadDeadline(time.Now().Add(60 * time.Second))    // drop silent connections
-conn.SetPongHandler(func(string) error {                   // reset deadline on heartbeat
-    conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+conn.SetReadLimit(MaxMessageSize)                               // 4KB max message size
+conn.SetReadDeadline(time.Now().Add(PongWait * time.Second))   // drop silent connections
+conn.SetPongHandler(func(string) error {                        // reset deadline on heartbeat
+    conn.SetReadDeadline(time.Now().Add(PongWait * time.Second))
     return nil
 })
 ```
@@ -565,10 +644,10 @@ A client sending a 1GB message is dropped before a single byte is processed. A c
 ```
 POST /rooms                  20 requests / IP / minute
 GET  /rooms/:code            10 requests / IP / minute    ← brute force protection
-WebSocket messages           30 messages / connection / second
+WebSocket messages           30 messages / connection / second  (constant defined, enforcement is Step 1 TODO)
 ```
 
-Message rate limiting per connection prevents a single bad client from flooding a room. Excess messages are silently dropped.
+The rate limiter uses a token bucket per IP address with a background cleanup goroutine that evicts stale entries every 5 minutes.
 
 ### HTTP Security Headers
 
@@ -590,7 +669,7 @@ CSP blocks XSS attacks even if an injection point is found — the browser refus
 
 ```
 Room code        Must match ^[A-Z]+-[A-Z]+-[0-9]+$  before any Redis call
-Display name     Strip all HTML, cap at 32 characters
+Display name     Strip all HTML tags, trim whitespace, cap at 32 Unicode characters
 Message type     Validated against known type allowlist — unknown types dropped
 Message size     Hard capped at 4KB by SetReadLimit
 ```
@@ -604,6 +683,8 @@ Access-Control-Allow-Origin   https://syncoplex.app    ← never wildcard
 Access-Control-Allow-Methods  GET, POST
 Access-Control-Allow-Headers  Content-Type
 ```
+
+Preflight OPTIONS requests from any other origin receive a 403.
 
 ### Dependency Auditing
 
@@ -627,17 +708,18 @@ With three dependencies the attack surface remains minimal. govulncheck scans al
 2. Host enters name, clicks Join
    WebSocket opens → wss://syncoplex.app/ws/WOLF-BEAR-4821
    Origin header validated ← rejected here if not your frontend
-   Member count checked    ← 403 if room full (never happens for host)
+   Room existence checked in Redis ← 404 if not found
+   Member count checked via Hub ← 403 if room full (never happens for host)
    Sends: { type: "join", payload: { name: "Host" } }
 
    Server:
    Generates userId + sessionToken
    Token held in memory on Client struct — NOT written to Redis yet
-   Sends: { type: "session_token", payload: { sessionToken } }  ← before Hub registration
-   Registers with Hub
-   Redis: hostId updated from "pending" to real userId
-   Sends: { type: "session_init", payload: { userId } }
-   Sends: { type: "room_state", payload: { members: [] } }   ← empty, host is first
+   conn.WriteMessage → { type: "session_token", payload: { sessionToken } }  ← before Hub registration
+   hub.register <- client
+   Hub goroutine: hostId updated from "pending" to real userId
+   Hub goroutine: client.send ← { type: "session_init", payload: { userId } }
+   Hub goroutine: client.send ← { type: "room_state", payload: { members: [] } }  ← empty, host is first
 
 3. Friend receives room code, opens app
    GET /rooms/WOLF-BEAR-4821
@@ -645,23 +727,30 @@ With three dependencies the attack surface remains minimal. govulncheck scans al
    Friend sees name entry form
 
 4. Friend enters name, clicks Join
-   Member count checked ← 403 if full
+   Member count checked via Hub ← 403 if full
    WebSocket opens, origin validated
+   Room existence checked in Redis
    Sends: { type: "join", payload: { name: "Alice" } }
 
    Server:
    Generates userId + sessionToken
    Token held in memory — NOT written to Redis yet
-   Sends: { type: "session_token", payload: { sessionToken } }  ← before Hub registration
-   Registers Alice with Hub
-   Sends Alice: { type: "session_init", payload: { userId } }
-   Sends Alice: { type: "room_state", payload: { members: [{ host }] } }
-   Broadcasts to host: { type: "user_joined", payload: { userId, name: "Alice" } }
+   conn.WriteMessage → { type: "session_token", payload: { sessionToken } }  ← before Hub registration
+   hub.register <- client
+   Hub goroutine: client.send ← { type: "session_init", payload: { userId } }
+   Hub goroutine: client.send ← { type: "room_state", payload: { members: [{ host }] } }
+   Hub goroutine: broadcastToOthers → { type: "user_joined", payload: { userId, name: "Alice" } }
 
 5. Alice's network blips — tab briefly disconnects
-   Hub unregisters Alice
-   HERE: session:{token} written to Redis with 5 min TTL ← reconnect clock starts now
-   Broadcasts: { type: "user_left", payload: { userId: alice-uuid } }
+   readPump exits → hub.unregister <- alice
+   Hub: stale pointer guard passes — this is still the active client
+   Hub: dropClient(alice)
+     → writeSessionOnDisconnect: session:{token} written to Redis with 5 min TTL ← reconnect clock starts now
+     → delete alice from room
+     → close alice.send
+     → resetRoomTTL
+     → broadcastToRoom: { type: "user_left", payload: { userId: alice-uuid } }
+     → no host migration needed (alice is not host)
 
    Alice's browser reconnects automatically (client-side retry)
    Sends: { type: "join", payload: { name: "Alice", sessionToken: "abc..." } }
@@ -669,22 +758,29 @@ With three dependencies the attack surface remains minimal. govulncheck scans al
    Server finds session in Redis — token valid:
    Token deleted immediately (one-time use)
    Fresh token issued, held in memory on new Client struct
-   Restores alice-uuid as userId
-   Sends: { type: "session_token", payload: { newSessionToken } }
-   Re-registers with Hub under same userId
-   Broadcasts: { type: "user_reconnected", payload: { userId: alice-uuid } }
+   Restores alice-uuid as userId, isReconnect = true
+   conn.WriteMessage → { type: "session_token", payload: { newSessionToken } }
+   hub.register <- newAliceClient
+   Hub: isReconnect=true, cap check bypassed
+   Hub: client.send ← { type: "session_init", payload: { userId: alice-uuid } }
+   Hub: client.send ← { type: "room_state", payload: { members: [{ host }] } }
+   Hub: broadcastToOthers → { type: "user_reconnected", payload: { userId: alice-uuid } }
    ← NOT user_joined — clients know not to reset peer state
 
 6. Host closes tab
-   Hub unregisters host
-   session:{token} written to Redis with 5 min TTL
-   Host migration: next member becomes host
-   Redis: hostId updated
-   Broadcasts: { type: "host_changed", payload: { userId: alice-uuid } }
-   Broadcasts: { type: "user_left", payload: { userId: host-uuid } }
+   Hub: dropClient(host)
+     → writeSessionOnDisconnect: session:{token} written to Redis
+     → delete host from room
+     → close host.send
+     → resetRoomTTL
+     → broadcastToRoom: { type: "user_left", payload: { userId: host-uuid } }
+     → host migration: next member becomes host
+     → Redis: hostId updated
+     → broadcastToRoom: { type: "host_changed", payload: { userId: alice-uuid } }
 
 7. Last person leaves
-   Hub: room entry deleted from in-memory map
+   Hub: dropClient → room empties
+   Hub: delete h.rooms[roomCode], delete h.hostIds[roomCode]
    Redis: room:{code} TTL collapsed to 5 minutes
 ```
 
@@ -750,6 +846,7 @@ The server is almost entirely in-memory during active sessions. Redis is consult
 | Use a web framework | net/http stdlib is sufficient — no framework overhead |
 | Expose Redis to the network | localhost only, always |
 | Write session token to Redis on connect | Token only matters after disconnect — writing it on connect wastes a Redis call and starts the TTL clock at the wrong time |
+| Use a channel-based count query for room members | A read lock on the Hub's mutex is simpler and sufficient for this single cross-goroutine read |
 
 Each omission is a feature. Everything the server does not do is something that cannot go wrong, cannot cost money, and cannot slow the user down.
 
@@ -759,11 +856,12 @@ Each omission is a feature. Everything the server does not do is something that 
 
 ```
 1. config.go        Environment variables, constants, room cap definition
-2. redis.go         Redis client singleton, connection with auth
+2. redis.go         Redis client singleton, connection with auth, pool sizing
 3. middleware.go    Rate limiter, security headers, CORS, input validation
 4. session.go       Token generation, Redis store/retrieve, reconnect identity
 5. rooms.go         Code generation, POST /rooms, GET /rooms/:code
-6. hub.go           Hub struct, Run loop, register/unregister/broadcast, host migration
+6. hub.go           Hub struct, Run loop, register/unregister/broadcast, host migration,
+                    WebSocket handler, read pump, write pump
 7. main.go          Wire all of the above, start server
 ```
 
