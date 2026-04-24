@@ -205,6 +205,8 @@ func (h *Hub) handleBroadcast(msg *Message) {
 	if !ok {
 		return
 	}
+
+	var toDrop []*Client
 	for _, client := range room {
 		if client.userId == msg.senderUserId {
 			continue // never echo back to sender
@@ -215,8 +217,12 @@ func (h *Hub) handleBroadcast(msg *Message) {
 		default:
 			// Buffer full — client is too slow or dead — drop it.
 			// Write session now since handleUnregister will never be called for this client.
-			h.dropClient(room, client)
+			toDrop = append(toDrop, client)
 		}
+	}
+
+	for _, client := range toDrop {
+		h.dropClient(room, client)
 	}
 }
 
@@ -227,12 +233,18 @@ func (h *Hub) broadcastToRoom(roomCode string, data []byte) {
 	if !ok {
 		return
 	}
+
+	var toDrop []*Client
 	for _, client := range room {
 		select {
 		case client.send <- data:
 		default:
-			h.dropClient(room, client)
+			toDrop = append(toDrop, client)
 		}
+	}
+
+	for _, client := range toDrop {
+		h.dropClient(room, client)
 	}
 }
 
@@ -241,6 +253,8 @@ func (h *Hub) broadcastToOthers(roomCode, excludeUserId string, data []byte) {
 	if !ok {
 		return
 	}
+
+	var toDrop []*Client
 	for _, client := range room {
 		if client.userId == excludeUserId {
 			continue
@@ -248,8 +262,12 @@ func (h *Hub) broadcastToOthers(roomCode, excludeUserId string, data []byte) {
 		select {
 		case client.send <- data:
 		default:
-			h.dropClient(room, client)
+			toDrop = append(toDrop, client)
 		}
+	}
+
+	for _, client := range toDrop {
+		h.dropClient(room, client)
 	}
 }
 
