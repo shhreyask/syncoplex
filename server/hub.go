@@ -297,7 +297,15 @@ func (h *Hub) dropClient(room map[string]*Client, client *Client) {
 	// The token was held in memory since connect; only at disconnect does it matter.
 	writeSessionOnDisconnect(ctx, h.rdb, client)
 
+	h.mu.Lock()
 	delete(room, client.userId)
+	remaining := len(room)
+	if(remaining == 0) {
+		delete(h.rooms, client.roomCode)
+		delete(h.hostIds, client.roomCode)
+	}
+	h.mu.Unlock()
+	
 	close(client.send)
 
 	// Reset TTL on leave
@@ -323,9 +331,7 @@ func (h *Hub) dropClient(room map[string]*Client, client *Client) {
 	}
 
 	// Room is empty — clean up in-memory, let Redis TTL expire the key after 5 minutes
-	if len(room) == 0 {
-		delete(h.rooms, client.roomCode)
-		delete(h.hostIds, client.roomCode)
+	if remaining == 0 {
 		h.rdb.Expire(ctx, "room:"+client.roomCode, 5*time.Minute)
 	}
 }
