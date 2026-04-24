@@ -22,8 +22,8 @@ A browser-based watch party website where a group of friends can watch the same 
 
 Modelled after Skribbl.io. No accounts, no passwords, no OAuth. The flow is:
 
-- Host clicks "Create Room" → server generates a short room code like `WOLF-4821`
-- Host shares the link: `syncoplex.app/room/WOLF-4821`
+- Host clicks "Create Room" → server generates a short room code like `WOLF-QUAIL-4821`
+- Host shares the link: `syncoplex.app/room/WOLF-QUAIL-4821`
 - Friends open the link, type a display name, and they're in
 
 Room state lives in Redis with a TTL so it automatically cleans up after the session ends. There is no user database. Sessions are ephemeral and tied entirely to the room lifetime. This was chosen because the friction of account creation is completely at odds with the casual, social nature of a watch party. You want the barrier to joining to be as close to zero as possible.
@@ -112,7 +112,8 @@ Each tile is a `<video>` element whose `srcObject` is set to the MediaStream com
 ## What the Server Does (and Doesn't Do)
 
 **Does:**
-- Manage room codes and membership in Redis with TTL
+- Manage room codes and host ownership in Redis with TTL
+- Manage membership in-memory
 - Relay WebRTC signaling messages (SDP offers, ICE candidates) between peers
 - Receive sync commands, attach server timestamps, and broadcast them to the room
 - Store the current authoritative playback state so a user who joins late can catch up
@@ -149,7 +150,7 @@ Each User's Browser
              │ WebSocket        │ WebRTC (P2P)
              ↓                  ↓
       Sync Server          Other users' browsers
-      (Node + Redis)       directly
+      (Go + Redis)         directly
       - Room state
       - Signaling relay
       - Sync broadcast

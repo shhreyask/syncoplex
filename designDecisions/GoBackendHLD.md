@@ -175,7 +175,7 @@ At 100 active rooms this is 100 Redis calls every 30 minutes. Effectively zero l
 ## Room Codes
 
 ```
-WOLF-BEAR-4821
+WOLF-BEAR-482134
 ```
 
 Two words from a curated list of 50 common animals + 6 random digits:
@@ -337,7 +337,15 @@ func (h *Hub) dropClient(room map[string]*Client, client *Client) {
     // Write session to Redis NOW — this is when the reconnect clock starts.
     writeSessionOnDisconnect(ctx, h.rdb, client)
 
+    h.mu.Lock()
     delete(room, client.userId)
+    remaining := len(room)
+    if remaining == 0 {
+        delete(h.rooms, client.roomCode)
+        delete(h.hostIds, client.roomCode)
+    }
+    h.mu.Unlock()
+
     close(client.send)
 
     // Reset TTL on leave
@@ -363,10 +371,8 @@ func (h *Hub) dropClient(room map[string]*Client, client *Client) {
         }
     }
 
-    // Room is empty — clean up in-memory, collapse Redis TTL to 5 minutes
-    if len(room) == 0 {
-        delete(h.rooms, client.roomCode)
-        delete(h.hostIds, client.roomCode)
+    // Room is empty — collapse Redis TTL to 5 minutes
+    if remaining == 0 {
         h.rdb.Expire(ctx, "room:"+client.roomCode, 5*time.Minute)
     }
 }
@@ -380,11 +386,11 @@ Note the ordering: `user_left` is always broadcast before `host_changed`. Client
 
 The Hub is the central nervous system of the server. It is the only thing that ever reads or writes the live connection map.
 
-### Why a Single Goroutine Instead of Locks (for the Hot Path)
+### Why a Single Goroutine for the Hot Path
 
-Shared mutable state protected by mutexes is a source of subtle production bugs — deadlocks, missed unlocks, lock contention under load. For the hot path (register, unregister, broadcast) the Hub goroutine owns the map exclusively with no locking needed. Correctness by construction.
+Shared mutable state protected by mutexes is a source of subtle production bugs — deadlocks, missed unlocks, lock contention under load. For the hot path (register, unregister, broadcast) a single Hub goroutine serialises all state changes, minimising the window in which the mutex is held.
 
-The one exception is `roomMemberCount`, which is called from HTTP handlers on their own goroutines and must read the map safely. A `sync.RWMutex` is used for this single read-only cross-goroutine path.
+A `sync.RWMutex` is used to protect the rooms map in `handleRegister` and `dropClient`, because `roomMemberCount` is called from HTTP handler goroutines and must read the map safely. The write lock is held only for the map insertion or deletion itself — all Redis calls and channel sends happen outside it.
 
 ### Data Structures
 
@@ -424,8 +430,7 @@ type Hub struct {
 ```
 ┌─────────────────────────────────────────────┐
 │  Hub Goroutine  (1, runs for server lifetime)│
-│  Owns rooms map and hostIds map             │
-│  Processes register/unregister/broadcast    │
+│  Serialises all register/unregister/broadcast│
 └─────────────────────────────────────────────┘
 
 Per connected user (2 goroutines each):
@@ -444,11 +449,12 @@ Per connected user (2 goroutines each):
 
 ### The Critical Broadcast Pattern
 
-The Hub **never writes to a WebSocket directly.** It only puts messages into each client's buffered send channel and moves on immediately. Relay messages exclude the sender:
+The Hub **never writes to a WebSocket directly.** It only puts messages into each client's buffered send channel and moves on immediately. Relay messages exclude the sender. Clients whose buffers are full are collected into a `toDrop` slice and dropped after the range loop completes — never during iteration:
 
 ```go
 case msg := <-h.broadcast:
     if room, ok := h.rooms[msg.roomCode]; ok {
+        var toDrop []*Client
         for _, client := range room {
             if client.userId == msg.senderUserId {
                 continue // never echo back to sender
@@ -458,8 +464,11 @@ case msg := <-h.broadcast:
                 // Delivered to buffer — Hub moves on immediately
             default:
                 // Buffer full — client is too slow or dead
-                h.dropClient(room, client)
+                toDrop = append(toDrop, client)
             }
+        }
+        for _, client := range toDrop {
+            h.dropClient(room, client)
         }
     }
 ```
@@ -473,7 +482,10 @@ func (c *Client) writePump() {
     defer c.conn.Close()
     for msg := range c.send {
         c.conn.SetWriteDeadline(time.Now().Add(WriteWait * time.Second))
-        c.conn.WriteMessage(websocket.TextMessage, msg)
+        if err := c.conn.WriteMessage(websocket.TextMessage, msg); err != nil {
+            // Write failed — connection is dead
+            break
+        }
     }
 }
 ```
@@ -701,12 +713,12 @@ With three dependencies the attack surface remains minimal. govulncheck scans al
 ```
 1. Host opens app
    POST /rooms
-   ← { code: "WOLF-BEAR-4821" }
-   Redis: room:WOLF-BEAR-4821 written with hostId: "pending"
-   Browser navigates to /room/WOLF-BEAR-4821
+   ← { code: "WOLF-BEAR-482134" }
+   Redis: room:WOLF-BEAR-482134 written with hostId: "pending"
+   Browser navigates to /room/WOLF-BEAR-482134
 
 2. Host enters name, clicks Join
-   WebSocket opens → wss://syncoplex.app/ws/WOLF-BEAR-4821
+   WebSocket opens → wss://syncoplex.app/ws/WOLF-BEAR-482134
    Origin header validated ← rejected here if not your frontend
    Room existence checked in Redis ← 404 if not found
    Member count checked via Hub ← 403 if room full (never happens for host)
@@ -722,7 +734,7 @@ With three dependencies the attack surface remains minimal. govulncheck scans al
    Hub goroutine: client.send ← { type: "room_state", payload: { members: [] } }  ← empty, host is first
 
 3. Friend receives room code, opens app
-   GET /rooms/WOLF-BEAR-4821
+   GET /rooms/WOLF-BEAR-482134
    ← { exists: true, memberCount: 1, full: false }
    Friend sees name entry form
 
@@ -746,7 +758,7 @@ With three dependencies the attack surface remains minimal. govulncheck scans al
    Hub: stale pointer guard passes — this is still the active client
    Hub: dropClient(alice)
      → writeSessionOnDisconnect: session:{token} written to Redis with 5 min TTL ← reconnect clock starts now
-     → delete alice from room
+     → delete alice from room (under mutex)
      → close alice.send
      → resetRoomTTL
      → broadcastToRoom: { type: "user_left", payload: { userId: alice-uuid } }
@@ -770,7 +782,7 @@ With three dependencies the attack surface remains minimal. govulncheck scans al
 6. Host closes tab
    Hub: dropClient(host)
      → writeSessionOnDisconnect: session:{token} written to Redis
-     → delete host from room
+     → delete host from room (under mutex)
      → close host.send
      → resetRoomTTL
      → broadcastToRoom: { type: "user_left", payload: { userId: host-uuid } }
@@ -780,7 +792,7 @@ With three dependencies the attack surface remains minimal. govulncheck scans al
 
 7. Last person leaves
    Hub: dropClient → room empties
-   Hub: delete h.rooms[roomCode], delete h.hostIds[roomCode]
+   Hub: delete h.rooms[roomCode], delete h.hostIds[roomCode] (under mutex)
    Redis: room:{code} TTL collapsed to 5 minutes
 ```
 
