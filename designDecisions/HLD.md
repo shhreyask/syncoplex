@@ -161,13 +161,14 @@ Each User's Browser
 ## Build Order for v1
 
 1. Room creation, join flow, room codes — WebSocket server and Redis
-2. File picker, `<video>` element, local playback
-3. Sync engine — play/pause/seek events through the server, timestamp compensation
-4. File fingerprinting — warn if files don't match
-5. WebRTC signaling server — route SDP and ICE messages
-6. Camera tiles — getUserMedia, peer connections, tile layout
-7. Audio routing — confirm mic-only goes over WebRTC, never movie audio
-8. Layout polish — overlay controls, dynamic tile grid, collapsible sidebar
-9. TURN server setup — Twilio credentials or self-hosted coturn
+2. Frontend Creation using vanillaJS
+3. File picker, `<video>` element, local playback
+4. Sync engine — play/pause/seek events through the server, timestamp compensation
+5. File fingerprinting — warn if files don't match
+6. WebRTC signaling server — route SDP and ICE messages
+7. Camera tiles — getUserMedia, peer connections, tile layout
+8. Audio routing — confirm mic-only goes over WebRTC, never movie audio
+9. Layout polish — overlay controls, dynamic tile grid, collapsible sidebar
+10. TURN server setup — Twilio credentials or self-hosted coturn
 
 Steps 1–4 can be built and tested alone before any WebRTC work begins. Steps 5–7 are independent of sync and can be developed in parallel. Step 8 and 9 are polish and infrastructure, done last.
