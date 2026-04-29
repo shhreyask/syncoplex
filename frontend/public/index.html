@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Syncoplex</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body data-view="landing">
+
+  <!-- ── Landing ──────────────────────────────────────────────── -->
+  <section id="view-landing">
+    <div class="landing-box">
+      <h1 class="wordmark">SYNCOPLEX</h1>
+      <p class="tagline">Watch together. In sync.</p>
+
+      <button id="btn-create" class="btn btn-primary">Create Room</button>
+
+      <div class="divider"><span>or join one</span></div>
+
+      <div class="join-row">
+        <input
+          id="input-join-code"
+          class="input"
+          type="text"
+          placeholder="WOLF-BEAR-482134"
+          maxlength="20"
+          autocomplete="off"
+          spellcheck="false"
+        />
+        <button id="btn-join" class="btn btn-secondary">Join</button>
+      </div>
+
+      <p id="landing-error" class="inline-error" hidden></p>
+    </div>
+  </section>
+
+  <!-- ── Lobby ────────────────────────────────────────────────── -->
+  <section id="view-lobby">
+    <div class="lobby-box">
+
+      <div class="lobby-header">
+        <span class="label">Room</span>
+        <span id="lobby-room-code" class="room-code">—</span>
+        <button id="btn-copy-code" class="btn-icon" title="Copy room code">⎘</button>
+      </div>
+
+      <div class="name-row">
+        <input
+          id="input-name"
+          class="input"
+          type="text"
+          placeholder="Your display name"
+          maxlength="32"
+          autocomplete="off"
+        />
+        <button id="btn-set-name" class="btn btn-primary">Set Name</button>
+      </div>
+
+      <p id="lobby-error" class="inline-error" hidden></p>
+
+      <div class="ws-status-bar">
+        <span id="ws-status-indicator" class="status-dot status-disconnected"></span>
+        <span id="ws-status-label">Disconnected</span>
+      </div>
+
+      <div class="members-panel">
+        <span class="label">In room</span>
+        <ul id="members-list" class="members-list">
+          <!-- populated by ui.js -->
+        </ul>
+      </div>
+
+      <p class="lobby-hint">Once everyone is here, pick a file and start watching.</p>
+
+      <button id="btn-leave-lobby" class="btn btn-ghost">← Leave</button>
+    </div>
+  </section>
+
+  <!-- ── Watch ─────────────────────────────────────────────────── -->
+  <section id="view-watch">
+    <!-- populated in step 3 -->
+    <p style="color:#fff;padding:2rem;">Watch view — coming in step 3.</p>
+  </section>
+
+  <!-- JS — concatenated order matters -->
+  <script src="js/state.js"></script>
+  <script src="js/ws.js"></script>
+  <script src="js/ui.js"></script>
+</body>
+</html>
