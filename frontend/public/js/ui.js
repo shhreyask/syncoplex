@@ -1,34 +1,33 @@
 // ── UI Layer ─────────────────────────────────────────────────────
 //
 // Listens for 'room:updated' and re-renders affected components.
-// Never imports or calls ws.js directly — all communication goes
-// through roomState and wsSend().
+// Never calls ws.js directly — all communication goes through
+// roomState and wsSend().
 //
-// Owns:
-//   - View transitions (landing → lobby → watch)
-//   - Landing: create room, join room
-//   - Lobby: name input, member list, WS status, copy code, leave
+// Flow:
+//   Landing → Create/Join → Lobby (no connection yet)
+//   User enters name → clicks Set Name → WebSocket connects
 
 // ── Element References ───────────────────────────────────────────
 
 const $ = (id) => document.getElementById(id)
 
 // Landing
-const btnCreate        = $('btn-create')
-const inputJoinCode    = $('input-join-code')
-const btnJoin          = $('btn-join')
-const landingError     = $('landing-error')
+const btnCreate     = $('btn-create')
+const inputJoinCode = $('input-join-code')
+const btnJoin       = $('btn-join')
+const landingError  = $('landing-error')
 
 // Lobby
-const lobbyRoomCode    = $('lobby-room-code')
-const btnCopyCode      = $('btn-copy-code')
-const inputName        = $('input-name')
-const btnSetName       = $('btn-set-name')
-const lobbyError       = $('lobby-error')
-const wsStatusDot      = $('ws-status-indicator')
-const wsStatusLabel    = $('ws-status-label')
-const membersList      = $('members-list')
-const btnLeaveLobby    = $('btn-leave-lobby')
+const lobbyRoomCode = $('lobby-room-code')
+const btnCopyCode   = $('btn-copy-code')
+const inputName     = $('input-name')
+const btnSetName    = $('btn-set-name')
+const lobbyError    = $('lobby-error')
+const wsStatusDot   = $('ws-status-indicator')
+const wsStatusLabel = $('ws-status-label')
+const membersList   = $('members-list')
+const btnLeaveLobby = $('btn-leave-lobby')
 
 // Reconnect pill (injected into body)
 const reconnectPill = (() => {
@@ -58,13 +57,18 @@ const clearError = (el) => {
 }
 
 // ── Landing Handlers ─────────────────────────────────────────────
+//
+// enterLobby only sets state and switches view.
+// No WebSocket connection is made here.
+// The user connects by entering a name and clicking Set Name.
 
-const enterLobby = (roomCode, name) => {
+const enterLobby = (roomCode) => {
   roomState.roomCode = roomCode
-  setMyName(name)
   lobbyRoomCode.textContent = roomCode
+  inputName.value = ''
+  clearError(lobbyError)
   showView('lobby')
-  connect(roomCode, name)
+  inputName.focus()
 }
 
 btnCreate.addEventListener('click', async () => {
@@ -77,15 +81,11 @@ btnCreate.addEventListener('click', async () => {
     if (!res.ok) throw new Error(`Server returned ${res.status}`)
     const data = await res.json()
 
-    // Backend returns { code: "WOLF-BEAR-482134" }
     const roomCode = data.code
     if (!roomCode) throw new Error('No room code in response')
 
-    const name = promptName()
-    if (!name) return
-
     history.pushState({}, '', `/room/${roomCode}`)
-    enterLobby(roomCode, name)
+    enterLobby(roomCode)
   } catch (err) {
     showError(landingError, 'Could not create room. Is the server running?')
     console.error(err)
@@ -118,11 +118,8 @@ const joinFromInput = async () => {
     if (!data.exists) { showError(landingError, 'Room not found.'); return }
     if (data.full)    { showError(landingError, 'Room is full.');    return }
 
-    const name = promptName()
-    if (!name) return
-
     history.pushState({}, '', `/room/${code}`)
-    enterLobby(code, name)
+    enterLobby(code)
   } catch (err) {
     showError(landingError, 'Could not reach server.')
     console.error(err)
@@ -132,18 +129,14 @@ const joinFromInput = async () => {
   }
 }
 
-const promptName = () => {
-  const raw = window.prompt('Your display name (max 32 chars):')
-  if (raw === null) return null
-  const name = validateName(raw)
-  if (!name) {
-    alert('Name cannot be empty or over 32 characters.')
-    return null
-  }
-  return name
-}
-
 // ── Lobby Handlers ───────────────────────────────────────────────
+//
+// Set Name is the single action that:
+//   1. Validates the name
+//   2. Stores it in roomState
+//   3. Opens the WebSocket connection
+//
+// If already connected (name change), it disconnects and reconnects.
 
 btnSetName.addEventListener('click', () => {
   const name = validateName(inputName.value)
@@ -153,6 +146,8 @@ btnSetName.addEventListener('click', () => {
   }
   clearError(lobbyError)
   setMyName(name)
+
+  // Disconnect first in case this is a name change mid-session
   disconnect()
   connect(roomState.roomCode, name)
 })
