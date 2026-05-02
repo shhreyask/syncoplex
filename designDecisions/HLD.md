@@ -171,4 +171,4 @@ Each User's Browser
 9. Layout polish — overlay controls, dynamic tile grid, collapsible sidebar
 10. TURN server setup — Twilio credentials or self-hosted coturn
 
-Steps 1–4 can be built and tested alone before any WebRTC work begins. Steps 5–7 are independent of sync and can be developed in parallel. Step 8 and 9 are polish and infrastructure, done last.
+Steps 1–5 can be built and tested alone before any WebRTC work begins. Steps 6–8 are independent of sync and can be developed in parallel. Step 9 and 10 are polish and infrastructure, done last.
