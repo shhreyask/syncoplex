@@ -32,10 +32,6 @@ const membersList       = $('members-list')
 const btnLeaveLobby     = $('btn-leave-lobby')
 const btnPickFile       = $('btn-pick-file')
 
-// Watch
-const filePickerOverlay = $('file-picker-overlay')
-const controlsBar       = $('controls-bar')
-const btnPlayPause      = $('btn-play-pause')
 
 // Reconnect pill (injected into body)
 const reconnectPill = (() => {
@@ -287,8 +283,10 @@ document.addEventListener('keydown', (e) => {
 // Fired by player.js when oncanplay fires for the first time.
 // This is the only place showView('watch') is called from player context.
 
-document.addEventListener('player:ready', () => showView('watch'))
-
+document.addEventListener('player:ready', () => {
+  showView('watch')
+  render()  // force renderWatch() now that the view has switched
+})
 // ── Main Render ──────────────────────────────────────────────────
 
 const render = () => {

@@ -21,10 +21,10 @@
 html, body { height: 100%; background: var(--bg); color: var(--text); font-family: var(--font-body); font-size: 15px; }
 
 /* ── View State Machine ─────────────────────────────────────────── */
-section                            { display: none; }
-body[data-view="landing"] #view-landing { display: flex; }
-body[data-view="lobby"]   #view-lobby   { display: flex; }
-body[data-view="watch"]   #view-watch   { display: block; }
+section                                  { display: none; }
+body[data-view="landing"] #view-landing  { display: flex; }
+body[data-view="lobby"]   #view-lobby    { display: flex; }
+body[data-view="watch"]   #view-watch    { display: block; }
 
 /* ── Landing ────────────────────────────────────────────────────── */
 #view-landing {
@@ -97,7 +97,7 @@ body[data-view="watch"]   #view-watch   { display: block; }
 
 .ws-status-bar { display: flex; align-items: center; gap: 0.5rem; font-size: 0.82rem; color: var(--text-dim); }
 
-.status-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.status-dot          { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
 .status-disconnected { background: var(--text-dim); }
 .status-connecting   { background: var(--warn); }
 .status-connected    { background: var(--accent); }
@@ -112,13 +112,10 @@ body[data-view="watch"]   #view-watch   { display: block; }
   border-radius: var(--radius);
   font-size: 0.9rem;
 }
-.members-list li.is-self { color: var(--accent); }
+.members-list li.is-self  { color: var(--accent); }
 .members-list li .member-tag { font-size: 0.75rem; color: var(--text-dim); margin-left: 0.4rem; }
 
 .lobby-hint { font-size: 0.82rem; color: var(--text-dim); }
-
-/* ── Watch ──────────────────────────────────────────────────────── */
-#view-watch { position: relative; width: 100vw; height: 100vh; background: #000; }
 
 /* ── Shared Components ──────────────────────────────────────────── */
 .label { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-dim); }
@@ -148,9 +145,9 @@ body[data-view="watch"]   #view-watch   { display: block; }
 }
 .btn:hover { opacity: 0.85; }
 
-.btn-primary  { background: var(--accent); color: #000; font-weight: 600; }
+.btn-primary   { background: var(--accent); color: #000; font-weight: 600; }
 .btn-secondary { background: var(--surface-2); color: var(--text); border: 1px solid var(--border); }
-.btn-ghost    { background: transparent; color: var(--text-dim); border: 1px solid var(--border); }
+.btn-ghost     { background: transparent; color: var(--text-dim); border: 1px solid var(--border); }
 
 .btn-icon {
   background: none;
@@ -185,7 +182,6 @@ body[data-view="watch"]   #view-watch   { display: block; }
 #reconnect-pill.visible { display: block; }
 
 /* ── Watch View ─────────────────────────────────────────────────── */
-
 #view-watch {
   position: relative;
   width: 100vw;
@@ -194,7 +190,6 @@ body[data-view="watch"]   #view-watch   { display: block; }
   overflow: hidden;
 }
 
-/* Video fills the viewport, letterboxed */
 #main-video {
   width: 100%;
   height: 100%;
@@ -203,7 +198,6 @@ body[data-view="watch"]   #view-watch   { display: block; }
 }
 
 /* ── File Picker Overlay ─────────────────────────────────────────── */
-
 #file-picker-overlay {
   position: absolute;
   inset: 0;
@@ -214,9 +208,7 @@ body[data-view="watch"]   #view-watch   { display: block; }
   z-index: 10;
 }
 
-#file-picker-overlay.hidden {
-  display: none;
-}
+#file-picker-overlay.hidden { display: none; }
 
 .picker-box {
   display: flex;
@@ -232,19 +224,11 @@ body[data-view="watch"]   #view-watch   { display: block; }
   width: 100%;
 }
 
-.picker-title {
-  font-size: 1rem;
-  color: var(--text);
-}
+.picker-title { font-size: 1rem; color: var(--text); }
 
-.picker-hint {
-  font-size: 0.82rem;
-  color: var(--text-dim);
-  margin-top: -0.25rem;
-}
+.picker-hint { font-size: 0.82rem; color: var(--text-dim); margin-top: -0.25rem; }
 
 /* ── Controls Bar ────────────────────────────────────────────────── */
-
 #controls-bar {
   position: absolute;
   bottom: 0;
@@ -267,7 +251,6 @@ body[data-view="watch"]   #view-watch   { display: block; }
 }
 
 /* ── Control Buttons ─────────────────────────────────────────────── */
-
 .ctrl-btn {
   background: none;
   border: none;
@@ -279,11 +262,10 @@ body[data-view="watch"]   #view-watch   { display: block; }
   flex-shrink: 0;
   transition: color 0.15s;
 }
-
 .ctrl-btn:hover { color: var(--accent); }
+.ctrl-btn.active { color: var(--accent); }
 
 /* ── Time Labels ─────────────────────────────────────────────────── */
-
 .time-label {
   font-family: var(--font-mono);
   font-size: 0.82rem;
@@ -293,14 +275,13 @@ body[data-view="watch"]   #view-watch   { display: block; }
 }
 
 /* ── Seek Bar ────────────────────────────────────────────────────── */
-
 .seek-bar {
   flex: 1;
   -webkit-appearance: none;
   appearance: none;
   height: 4px;
   border-radius: 2px;
-  background: var(--border);
+  background: linear-gradient(to right, var(--accent) var(--pct, 0%), var(--border) var(--pct, 0%));
   cursor: pointer;
   outline: none;
 }
@@ -325,14 +306,13 @@ body[data-view="watch"]   #view-watch   { display: block; }
 }
 
 /* ── Volume Slider ───────────────────────────────────────────────── */
-
 .volume-slider {
   -webkit-appearance: none;
   appearance: none;
   width: 80px;
   height: 4px;
   border-radius: 2px;
-  background: var(--border);
+  background: linear-gradient(to right, var(--text) var(--pct, 100%), var(--border) var(--pct, 100%));
   cursor: pointer;
   outline: none;
   flex-shrink: 0;
@@ -358,7 +338,15 @@ body[data-view="watch"]   #view-watch   { display: block; }
 }
 
 /* ── Lobby: Pick File button ─────────────────────────────────────── */
+#btn-pick-file { width: 100%; }
 
-#btn-pick-file {
-  width: 100%;
+/* ── Subtitle Styling ────────────────────────────────────────────── */
+::cue {
+  background: transparent;
+  color: #ffffff;
+  text-shadow:
+    -1px -1px 0 #000,
+     1px -1px 0 #000,
+    -1px  1px 0 #000,
+     1px  1px 0 #000;
 }

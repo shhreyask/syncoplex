@@ -66,9 +66,7 @@
 
       <div class="members-panel">
         <span class="label">In room</span>
-        <ul id="members-list" class="members-list">
-          <!-- populated by ui.js -->
-        </ul>
+        <ul id="members-list" class="members-list"></ul>
       </div>
 
       <p class="lobby-hint">Once everyone is here, pick a file and start watching.</p>
@@ -92,7 +90,9 @@
       </div>
     </div>
 
-    <video id="main-video" playsinline></video>
+    <video id="main-video" playsinline crossorigin="anonymous">
+      <track id="subtitle-track" kind="subtitles" default />
+    </video>
 
     <div id="controls-bar">
       <button id="btn-play-pause" class="ctrl-btn">▶</button>
@@ -101,6 +101,9 @@
       <span   id="time-total"     class="time-label">0:00</span>
       <input  id="volume-slider"  class="volume-slider" type="range" min="0" max="1" step="0.05" value="1" />
       <button id="btn-mute"       class="ctrl-btn">🔊</button>
+      <button id="btn-cc"         class="ctrl-btn" title="Load subtitles">CC</button>
+      <button id="btn-fullscreen" class="ctrl-btn" title="Fullscreen">⛶</button>
+      <input  id="input-subtitle" type="file" accept=".vtt,.srt" hidden />
     </div>
 
   </section>
