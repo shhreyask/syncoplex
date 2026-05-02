@@ -1,0 +1,123 @@
+// ── File States ──────────────────────────────────────────────────
+const FILE_STATES = {
+  WAITING:  'waiting',
+  HASHING:  'hashing',
+  MISMATCH: 'mismatch',
+  READY:    'ready',
+  PLAYING:  'playing',
+  PAUSED:   'paused',
+}
+
+// ── Single Source of Truth ───────────────────────────────────────
+const roomState = {
+  // Identity
+  myUserId:     null,
+  myName:       null,
+  sessionToken: null,
+
+  // Room
+  roomCode:     null,
+  members:      [], // [{ userId, name, fileReady }]
+
+  // Playback
+  playback: {
+    playing:    false,
+    position:   0,
+    serverTime: null,
+  },
+
+  // File
+  file:      null,
+  blobUrl:   null,
+  fileReady: false,
+  fileHash:  null,
+  fileState: FILE_STATES.WAITING,
+
+  // Connection
+  wsStatus: 'disconnected', // 'disconnected' | 'connecting' | 'connected'
+}
+
+// ── Event Bus ────────────────────────────────────────────────────
+//
+// Any module that changes roomState calls notifyUpdate().
+// ui.js listens for 'room:updated' and re-renders.
+// ws.js and ui.js never reference each other directly.
+
+const notifyUpdate = () => {
+  document.dispatchEvent(new CustomEvent('room:updated'))
+}
+
+//Single reset call
+const resetRoomState = () => {
+    roomState.roomCode     = null
+    roomState.myUserId     = null
+    roomState.myName       = null
+    roomState.sessionToken = null
+    roomState.members      = []
+    roomState.playback     = { playing: false, position: 0, serverTime: null }
+    roomState.file         = null
+    if (roomState.blobUrl) URL.revokeObjectURL(roomState.blobUrl) 
+    roomState.blobUrl      = null
+    roomState.fileReady    = false
+    roomState.fileHash     = null
+    roomState.fileState    = FILE_STATES.WAITING
+    // one notifyUpdate() at the end, not one per field
+    notifyUpdate()
+}
+
+// ── State Helpers ────────────────────────────────────────────────
+
+const setWsStatus = (status) => {
+  roomState.wsStatus = status
+  notifyUpdate()
+}
+
+const setFileState = (state) => {
+  roomState.fileState = state
+  notifyUpdate()
+}
+
+const setMyName = (name) => {
+  roomState.myName = name
+  notifyUpdate()
+}
+
+// Add a member — no-op if already present
+const addMember = (userId, name) => {
+  if (roomState.members.find(m => m.userId === userId)) return
+  roomState.members.push({ userId, name, fileReady: false })
+  notifyUpdate()
+}
+
+// Remove a member by userId
+const removeMember = (userId) => {
+  roomState.members = roomState.members.filter(m => m.userId !== userId)
+  notifyUpdate()
+}
+
+// Replace the full member list (used on room_state snapshot)
+const setMembers = (list) => {
+  roomState.members = list.map(m => ({ userId: m.userId, name: m.name, fileReady: false }))
+  notifyUpdate()
+}
+
+// ── Session Token Persistence ────────────────────────────────────
+//
+// sessionStorage: survives tab refresh, cleared on tab close.
+// Matches backend session semantics exactly.
+
+const SESSION_KEY = 'syncoplex_token'
+
+const saveSessionToken = (token) => {
+  roomState.sessionToken = token
+  sessionStorage.setItem(SESSION_KEY, token)
+}
+
+const loadSessionToken = () => {
+  return sessionStorage.getItem(SESSION_KEY)
+}
+
+const clearSessionToken = () => {
+  roomState.sessionToken = null
+  sessionStorage.removeItem(SESSION_KEY)
+}

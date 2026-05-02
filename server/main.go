@@ -3,13 +3,13 @@ package main
 import (
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
 )
 
 func main() {
-	// Load .env — ignore error in production (env vars set externally)
 	_ = godotenv.Load("../.env")
 
 	cfg := LoadConfig()
@@ -25,38 +25,45 @@ func main() {
 	roomCreateLimiter := newRateLimiter(RateRoomCreate, time.Minute)
 	roomLookupLimiter := newRateLimiter(RateRoomLookup, time.Minute)
 
-	// ── Middleware Stack ──────────────────────────────────────────────────────
-	//
-	// Every request passes through:
-	//   security headers → CORS → rate limiter → handler
-	//
-	// Rate limiters are applied per-route with their own limits.
-
 	wrap := func(handler http.Handler, limiter *rateLimiter) http.Handler {
 		return securityHeaders(cors(cfg.AllowedOrigin)(limiter.middleware(handler)))
 	}
+
+	// ── Static File Server ────────────────────────────────────────────────────
+
+	const publicDir = "../frontend/public"
+	fileServer := http.FileServer(http.Dir(publicDir))
+
+	staticHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+
+		// /room/:code — SPA route, serve index.html
+		if strings.HasPrefix(path, "/room/") {
+			w.Header().Set("Cache-Control", "no-cache")
+			http.ServeFile(w, r, publicDir+"/index.html")
+			return
+		}
+
+		// Cache headers
+		if strings.HasSuffix(path, ".js") || strings.HasSuffix(path, ".css") {
+			w.Header().Set("Cache-Control", "max-age=31536000, immutable")
+		} else {
+			w.Header().Set("Cache-Control", "no-cache")
+		}
+
+		fileServer.ServeHTTP(w, r)
+	})
 
 	// ── Routes ────────────────────────────────────────────────────────────────
 
 	mux := http.NewServeMux()
 
-	// POST /rooms — create a new room
-	mux.Handle("/rooms", wrap(
-		handleCreateRoom(rdb),
-		roomCreateLimiter,
-	))
-
-	// GET /rooms/:code — check room exists, member count, full status
-	mux.Handle("/rooms/", wrap(
-		handleGetRoom(rdb, hub),
-		roomLookupLimiter,
-	))
-
-	// GET /ws/:code — WebSocket upgrade, no rate limiter here
-	// Rate limiting at WebSocket message level is handled inside readPump
+	mux.Handle("/rooms", wrap(handleCreateRoom(rdb), roomCreateLimiter))
+	mux.Handle("/rooms/", wrap(handleGetRoom(rdb, hub), roomLookupLimiter))
 	mux.Handle("/ws/", securityHeaders(cors(cfg.AllowedOrigin)(
 		http.HandlerFunc(handleWebSocket(hub, rdb, upgrader)),
 	)))
+	mux.Handle("/", securityHeaders(staticHandler))
 
 	// ── Server ────────────────────────────────────────────────────────────────
 
@@ -68,7 +75,7 @@ func main() {
 		IdleTimeout:  60 * time.Second,
 	}
 
-	log.Printf("syncoplex: listening on :%s", cfg.Port)
+	log.Printf("syncoplex: listening on :%s (frontend: %s)", cfg.Port, publicDir)
 	if err := srv.ListenAndServe(); err != nil {
 		log.Fatalf("syncoplex: server error — %v", err)
 	}
