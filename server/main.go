@@ -39,6 +39,7 @@ func main() {
 
 		// /room/:code — SPA route, serve index.html
 		if strings.HasPrefix(path, "/room/") {
+			w.Header().Set("Cache-Control", "no-cache")
 			http.ServeFile(w, r, publicDir+"/index.html")
 			return
 		}

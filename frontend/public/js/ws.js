@@ -111,13 +111,9 @@ const connect = (roomCode, name) => {
 
   ws.onclose = () => {
     ws = null
-    if (manualClose) {
-      setWsStatus('disconnected')
-      return
-    }
     setWsStatus('disconnected')
-    scheduleReconnect(roomCode, name)
-  }
+    if (!manualClose) scheduleReconnect(roomCode, name)
+}
 
   ws.onerror = () => {
     // onerror always fires before onclose — let onclose drive reconnect logic
