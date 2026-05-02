@@ -166,10 +166,7 @@ btnCopyCode.addEventListener('click', () => {
 
 btnLeaveLobby.addEventListener('click', () => {
   disconnect()
-  roomState.roomCode = null
-  roomState.myUserId = null
-  roomState.myName   = null
-  roomState.members  = []
+  resetRoomState()
   history.pushState({}, '', '/')
   showView('landing')
 })

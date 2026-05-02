@@ -47,6 +47,23 @@ const notifyUpdate = () => {
   document.dispatchEvent(new CustomEvent('room:updated'))
 }
 
+//Single reset call
+const resetRoomState = () => {
+    roomState.roomCode     = null
+    roomState.myUserId     = null
+    roomState.myName       = null
+    roomState.sessionToken = null
+    roomState.members      = []
+    roomState.playback     = { playing: false, position: 0, serverTime: null }
+    roomState.file         = null
+    roomState.blobUrl      = null
+    roomState.fileReady    = false
+    roomState.fileHash     = null
+    roomState.fileState    = FILE_STATES.WAITING
+    // one notifyUpdate() at the end, not one per field
+    notifyUpdate()
+}
+
 // ── State Helpers ────────────────────────────────────────────────
 
 const setWsStatus = (status) => {
