@@ -7,6 +7,8 @@
 // Flow:
 //   Landing → Create/Join → Lobby (no connection yet)
 //   User enters name → clicks Set Name → WebSocket connects
+//   wsStatus === 'connected' → Pick File & Watch button appears
+//   user picks file → player:ready → showView('watch')
 
 // ── Element References ───────────────────────────────────────────
 
@@ -19,15 +21,21 @@ const btnJoin       = $('btn-join')
 const landingError  = $('landing-error')
 
 // Lobby
-const lobbyRoomCode = $('lobby-room-code')
-const btnCopyCode   = $('btn-copy-code')
-const inputName     = $('input-name')
-const btnSetName    = $('btn-set-name')
-const lobbyError    = $('lobby-error')
-const wsStatusDot   = $('ws-status-indicator')
-const wsStatusLabel = $('ws-status-label')
-const membersList   = $('members-list')
-const btnLeaveLobby = $('btn-leave-lobby')
+const lobbyRoomCode     = $('lobby-room-code')
+const btnCopyCode       = $('btn-copy-code')
+const inputName         = $('input-name')
+const btnSetName        = $('btn-set-name')
+const lobbyError        = $('lobby-error')
+const wsStatusDot       = $('ws-status-indicator')
+const wsStatusLabel     = $('ws-status-label')
+const membersList       = $('members-list')
+const btnLeaveLobby     = $('btn-leave-lobby')
+const btnPickFile       = $('btn-pick-file')
+
+// Watch
+const filePickerOverlay = $('file-picker-overlay')
+const controlsBar       = $('controls-bar')
+const btnPlayPause      = $('btn-play-pause')
 
 // Reconnect pill (injected into body)
 const reconnectPill = (() => {
@@ -57,10 +65,6 @@ const clearError = (el) => {
 }
 
 // ── Landing Handlers ─────────────────────────────────────────────
-//
-// enterLobby only sets state and switches view.
-// No WebSocket connection is made here.
-// The user connects by entering a name and clicking Set Name.
 
 const enterLobby = (roomCode) => {
   roomState.roomCode = roomCode
@@ -130,13 +134,6 @@ const joinFromInput = async () => {
 }
 
 // ── Lobby Handlers ───────────────────────────────────────────────
-//
-// Set Name is the single action that:
-//   1. Validates the name
-//   2. Stores it in roomState
-//   3. Opens the WebSocket connection
-//
-// If already connected (name change), it disconnects and reconnects.
 
 btnSetName.addEventListener('click', () => {
   const name = validateName(inputName.value)
@@ -147,7 +144,6 @@ btnSetName.addEventListener('click', () => {
   clearError(lobbyError)
   setMyName(name)
 
-  // Disconnect first in case this is a name change mid-session
   disconnect()
   connect(roomState.roomCode, name)
 })
@@ -170,6 +166,9 @@ btnLeaveLobby.addEventListener('click', () => {
   history.pushState({}, '', '/')
   showView('landing')
 })
+
+// "Pick File & Watch" — only visible when connected, calls player directly
+btnPickFile.addEventListener('click', () => player.openPicker())
 
 // ── Member List Renderer ─────────────────────────────────────────
 
@@ -209,15 +208,86 @@ const renderWsStatus = () => {
     wsStatusDot.classList.add('status-connected')
     wsStatusLabel.textContent = 'Connected'
     reconnectPill.classList.remove('visible')
+    btnPickFile.hidden = false   // show only when connected
   } else if (status === 'connecting') {
     wsStatusDot.classList.add('status-connecting')
     wsStatusLabel.textContent = 'Connecting…'
     if (roomState.myUserId) reconnectPill.classList.add('visible')
+    btnPickFile.hidden = true
   } else {
     wsStatusDot.classList.add('status-disconnected')
     wsStatusLabel.textContent = 'Disconnected'
+    btnPickFile.hidden = true
   }
 }
+
+// ── Watch View Renderer ──────────────────────────────────────────
+//
+// Called on every room:updated while in watch view.
+// Manages overlay visibility, controls visibility, play/pause icon.
+// Never touches video.currentTime — that belongs to player.js.
+
+const renderWatch = () => {
+  // Play/pause icon
+  btnPlayPause.textContent = video.paused ? '▶' : '⏸'
+
+  const ready = roomState.fileState !== FILE_STATES.WAITING &&
+                roomState.fileState !== FILE_STATES.HASHING
+
+  // Overlay: visible until file is ready
+  filePickerOverlay.classList.toggle('hidden', ready)
+
+  // Controls: hidden until ready; always visible while paused
+  if (!ready) {
+    controlsBar.classList.add('hidden')
+  } else if (video.paused) {
+    controlsBar.classList.remove('hidden')
+  }
+  // When playing and ready, the hide timer manages visibility
+}
+
+// ── Controls Auto-Hide ───────────────────────────────────────────
+//
+// opacity + pointer-events, never display:none — no layout thrash.
+// Never hides while paused — checked before setting the timer.
+// touchstart included because mousemove doesn't fire on touchscreens.
+
+let hideTimer
+
+const resetHideTimer = () => {
+  controlsBar.classList.remove('hidden')
+  clearTimeout(hideTimer)
+  hideTimer = setTimeout(() => {
+    if (!video.paused) controlsBar.classList.add('hidden')
+  }, 3000)
+}
+
+document.addEventListener('mousemove',  resetHideTimer)
+document.addEventListener('touchstart', resetHideTimer, { passive: true })
+
+// ── Keyboard Shortcuts ───────────────────────────────────────────
+//
+// All playback actions go through player.js — never touch
+// video.currentTime directly here. That would bypass the
+// readyState guard and dispatchPlayerAction, silently desyncing
+// arrow key seeks in step 4.
+
+document.addEventListener('keydown', (e) => {
+  if (document.body.dataset.view !== 'watch') return
+  if (e.target.tagName === 'INPUT') return
+
+  if (e.code === 'Space')      { e.preventDefault(); btnPlayPause.click() }
+  if (e.code === 'ArrowRight') { e.preventDefault(); player.nudge(+5) }
+  if (e.code === 'ArrowLeft')  { e.preventDefault(); player.nudge(-5) }
+  if (e.code === 'KeyM')       { $('btn-mute').click() }
+})
+
+// ── player:ready ─────────────────────────────────────────────────
+//
+// Fired by player.js when oncanplay fires for the first time.
+// This is the only place showView('watch') is called from player context.
+
+document.addEventListener('player:ready', () => showView('watch'))
 
 // ── Main Render ──────────────────────────────────────────────────
 
@@ -226,6 +296,9 @@ const render = () => {
   if (view === 'lobby') {
     renderWsStatus()
     renderMembers()
+  }
+  if (view === 'watch') {
+    renderWatch()
   }
 }
 
