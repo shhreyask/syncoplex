@@ -73,19 +73,42 @@
 
       <p class="lobby-hint">Once everyone is here, pick a file and start watching.</p>
 
+      <button id="btn-pick-file" class="btn btn-primary" hidden>Pick File &amp; Watch</button>
+
       <button id="btn-leave-lobby" class="btn btn-ghost">← Leave</button>
     </div>
   </section>
 
   <!-- ── Watch ─────────────────────────────────────────────────── -->
   <section id="view-watch">
-    <!-- populated in step 3 -->
-    <p style="color:#fff;padding:2rem;">Watch view — coming in step 3.</p>
+
+    <div id="file-picker-overlay">
+      <div class="picker-box">
+        <p class="picker-title">Select your local copy of the movie</p>
+        <p class="picker-hint">MP4 recommended. MKV support varies by browser.</p>
+        <label class="btn btn-primary" for="input-file">Choose File</label>
+        <input id="input-file" type="file" accept=".mp4,.mkv,.avi,.mov" hidden />
+        <p id="file-error" class="inline-error" hidden></p>
+      </div>
+    </div>
+
+    <video id="main-video" playsinline></video>
+
+    <div id="controls-bar">
+      <button id="btn-play-pause" class="ctrl-btn">▶</button>
+      <span   id="time-current"   class="time-label">0:00</span>
+      <input  id="seek-bar"       class="seek-bar" type="range" min="0" max="100" value="0" step="0.01" />
+      <span   id="time-total"     class="time-label">0:00</span>
+      <input  id="volume-slider"  class="volume-slider" type="range" min="0" max="1" step="0.05" value="1" />
+      <button id="btn-mute"       class="ctrl-btn">🔊</button>
+    </div>
+
   </section>
 
-  <!-- JS — concatenated order matters -->
+  <!-- JS — concatenation order matters -->
   <script src="/js/state.js"></script>
   <script src="/js/ws.js"></script>
+  <script src="/js/player.js"></script>
   <script src="/js/ui.js"></script>
 </body>
 </html>

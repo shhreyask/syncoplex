@@ -183,3 +183,182 @@ body[data-view="watch"]   #view-watch   { display: block; }
   z-index: 100;
 }
 #reconnect-pill.visible { display: block; }
+
+/* ── Watch View ─────────────────────────────────────────────────── */
+
+#view-watch {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+  background: #000;
+  overflow: hidden;
+}
+
+/* Video fills the viewport, letterboxed */
+#main-video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+/* ── File Picker Overlay ─────────────────────────────────────────── */
+
+#file-picker-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.85);
+  z-index: 10;
+}
+
+#file-picker-overlay.hidden {
+  display: none;
+}
+
+.picker-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1rem;
+  padding: 2.5rem 3rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  text-align: center;
+  max-width: 380px;
+  width: 100%;
+}
+
+.picker-title {
+  font-size: 1rem;
+  color: var(--text);
+}
+
+.picker-hint {
+  font-size: 0.82rem;
+  color: var(--text-dim);
+  margin-top: -0.25rem;
+}
+
+/* ── Controls Bar ────────────────────────────────────────────────── */
+
+#controls-bar {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  padding: 1rem 1.5rem;
+  background: linear-gradient(transparent, rgba(0, 0, 0, 0.75));
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  z-index: 5;
+  opacity: 1;
+  pointer-events: auto;
+  transition: opacity 0.3s;
+}
+
+#controls-bar.hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* ── Control Buttons ─────────────────────────────────────────────── */
+
+.ctrl-btn {
+  background: none;
+  border: none;
+  color: var(--text);
+  font-size: 1.1rem;
+  cursor: pointer;
+  padding: 0.25rem 0.4rem;
+  border-radius: var(--radius);
+  flex-shrink: 0;
+  transition: color 0.15s;
+}
+
+.ctrl-btn:hover { color: var(--accent); }
+
+/* ── Time Labels ─────────────────────────────────────────────────── */
+
+.time-label {
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  color: var(--text);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* ── Seek Bar ────────────────────────────────────────────────────── */
+
+.seek-bar {
+  flex: 1;
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border);
+  cursor: pointer;
+  outline: none;
+}
+
+.seek-bar::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: pointer;
+}
+
+.seek-bar::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: pointer;
+  border: none;
+}
+
+/* ── Volume Slider ───────────────────────────────────────────────── */
+
+.volume-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 80px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border);
+  cursor: pointer;
+  outline: none;
+  flex-shrink: 0;
+}
+
+.volume-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--text);
+  cursor: pointer;
+}
+
+.volume-slider::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--text);
+  cursor: pointer;
+  border: none;
+}
+
+/* ── Lobby: Pick File button ─────────────────────────────────────── */
+
+#btn-pick-file {
+  width: 100%;
+}
