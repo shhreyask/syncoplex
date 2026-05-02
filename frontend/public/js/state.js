@@ -56,6 +56,7 @@ const resetRoomState = () => {
     roomState.members      = []
     roomState.playback     = { playing: false, position: 0, serverTime: null }
     roomState.file         = null
+    if (roomState.blobUrl) URL.revokeObjectURL(roomState.blobUrl) 
     roomState.blobUrl      = null
     roomState.fileReady    = false
     roomState.fileHash     = null
