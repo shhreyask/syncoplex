@@ -249,13 +249,20 @@ const renderWatch = () => {
 // touchstart included because mousemove doesn't fire on touchscreens.
 
 let hideTimer
+let controlsVisible = true
 
 const resetHideTimer = () => {
   if (document.body.dataset.view !== 'watch') return
-  controlsBar.classList.remove('hidden')
+  if (!controlsVisible) {
+    controlsBar.classList.remove('hidden')
+    controlsVisible = true
+  }
   clearTimeout(hideTimer)
   hideTimer = setTimeout(() => {
-    if (!video.paused) controlsBar.classList.add('hidden')
+    if (!video.paused) {
+      controlsBar.classList.add('hidden')
+      controlsVisible = false
+    }
   }, 3000)
 }
 

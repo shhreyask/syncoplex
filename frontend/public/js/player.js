@@ -65,7 +65,7 @@ const seekTo = (position) => {
 //   3. Numeric sequence lines (1, 2, 3…) are valid VTT cue identifiers
 //      so no stripping needed — browsers handle them fine.
 
-const srtToVtt = (srt) => 'WEBVTT\n\n' + srt.replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, '$1.$2')
+const srtToVtt = (srt) => 'WEBVTT\n\n' + srt.replace(/(\d{1,2}:\d{2}:\d{2}),(\d{3})/g, '$1.$2')
 
 // ── Subtitle Loading ─────────────────────────────────────────────
 
@@ -76,7 +76,7 @@ const loadSubtitle = (file) => {
     let content = e.target.result
 
     // Convert SRT to VTT if needed
-    if (file.name.endsWith('.srt')) content = srtToVtt(content)
+    if (file.name.toLowerCase().endsWith('.srt')) content = srtToVtt(content)
 
     // Revoke previous blob to avoid memory leak
     if (subtitleBlobUrl) URL.revokeObjectURL(subtitleBlobUrl)
@@ -182,9 +182,11 @@ btnPlayPause.addEventListener('click', () => {
       if (err.name !== 'AbortError') console.error('player: play failed —', err)
     })
     dispatchPlayerAction('play', video.currentTime)
+    btnPlayPause.setAttribute('aria-label', 'Pause')
   } else {
     video.pause()
     dispatchPlayerAction('pause', video.currentTime)
+    btnPlayPause.setAttribute('aria-label', 'Play')
   }
 })
 
@@ -201,6 +203,7 @@ viewWatch.addEventListener('click', (e) => {
 btnMute.addEventListener('click', () => {
   video.muted = !video.muted
   btnMute.textContent = video.muted ? '🔇' : '🔊'
+  btnMute.setAttribute('aria-label', video.muted ? 'Unmute' : 'Mute')
 })
 
 // ── Volume Persistence ───────────────────────────────────────────
@@ -258,8 +261,10 @@ viewWatch.addEventListener('drop', (e) => {
   const file = e.dataTransfer.files[0]
   if (!file) return
 
+  
   // Route to subtitle loader if it's a subtitle file
-  if (file.name.endsWith('.srt') || file.name.endsWith('.vtt')) {
+  const ext = file.name.split('.').pop().toLowerCase()
+  if (ext === 'srt' || ext === 'vtt') {
     loadSubtitle(file)
   } else {
     loadFile(file)
@@ -278,6 +283,8 @@ btnFullscreen.addEventListener('click', () => {
 
 document.addEventListener('fullscreenchange', () => {
   btnFullscreen.textContent = document.fullscreenElement ? '✕' : '⛶'
+  btnFullscreen.setAttribute('aria-label', document.fullscreenElement ? 'Exit fullscreen' : 'Enter fullscreen')
+
 })
 
 // ── File Input ───────────────────────────────────────────────────
@@ -285,6 +292,7 @@ document.addEventListener('fullscreenchange', () => {
 fileInput.addEventListener('change', () => {
   const file = fileInput.files[0]
   if (file) loadFile(file)
+  fileInput.value = ''
 })
 
 // ── Public API ───────────────────────────────────────────────────
