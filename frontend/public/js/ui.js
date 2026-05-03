@@ -278,7 +278,7 @@ document.addEventListener('touchstart', resetHideTimer, { passive: true })
 
 document.addEventListener('keydown', (e) => {
   if (document.body.dataset.view !== 'watch') return
-  if (e.target.tagName === 'INPUT') return
+  if (e.target.matches('input, textarea, select, [contenteditable]')) return
 
   if (e.code === 'Space')      { e.preventDefault(); btnPlayPause.click() }
   if (e.code === 'ArrowRight') { e.preventDefault(); player.nudge(+5) }

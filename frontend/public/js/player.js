@@ -212,7 +212,7 @@ const VOLUME_KEY = 'syncoplex_volume'
 
 const savedVolume = sessionStorage.getItem(VOLUME_KEY)
 if (savedVolume !== null) {
-  video.volume       = parseFloat(savedVolume)
+  video.volume = Math.max(0, Math.min(1, parseFloat(savedVolume) || 1))
   volumeSlider.value = savedVolume
 }
 updateRangeFill(volumeSlider)
