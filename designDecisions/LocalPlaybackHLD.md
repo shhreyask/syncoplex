@@ -651,11 +651,6 @@ const renderWatch = () => {
 }
 ```
 
-```js
-video.onplay  = () => notifyUpdate()
-video.onpause = () => notifyUpdate()
-```
-
 ---
 
 ## Security — File Handling

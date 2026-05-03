@@ -251,6 +251,7 @@ const renderWatch = () => {
 let hideTimer
 
 const resetHideTimer = () => {
+  if (document.body.dataset.view !== 'watch') return
   controlsBar.classList.remove('hidden')
   clearTimeout(hideTimer)
   hideTimer = setTimeout(() => {
@@ -276,6 +277,7 @@ document.addEventListener('keydown', (e) => {
   if (e.code === 'ArrowRight') { e.preventDefault(); player.nudge(+5) }
   if (e.code === 'ArrowLeft')  { e.preventDefault(); player.nudge(-5) }
   if (e.code === 'KeyM')       { $('btn-mute').click() }
+  if (e.code === 'KeyF')       { $('btn-fullscreen').click() }
 })
 
 // ── player:ready ─────────────────────────────────────────────────

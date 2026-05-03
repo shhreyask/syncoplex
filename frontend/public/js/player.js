@@ -269,7 +269,6 @@ viewWatch.addEventListener('drop', (e) => {
 btnFullscreen.addEventListener('click', () => {
   if (!document.fullscreenElement) {
     viewWatch.requestFullscreen()
-    btnFullscreen.textContent = '⛶'
   } else {
     document.exitFullscreen()
   }
