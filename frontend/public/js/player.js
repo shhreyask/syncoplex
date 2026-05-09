@@ -170,7 +170,11 @@ seekBar.addEventListener('input', () => {
   updateRangeFill(seekBar)
 })
 
-seekBar.addEventListener('change', () => {
+// 'pointerup' fires exactly once on pointer release, cross-browser.
+// 'change' fired inconsistently during drag on iOS Safari — replaced here.
+// Known gap: tab-to-seekbar + keyboard arrow keys move the slider locally
+// but do not fire pointerup → no sync command sent. Documented for v1.
+seekBar.addEventListener('pointerup', () => {
   dispatchPlayerAction('seek', video.currentTime)
 })
 
@@ -261,7 +265,6 @@ viewWatch.addEventListener('drop', (e) => {
   const file = e.dataTransfer.files[0]
   if (!file) return
 
-  
   // Route to subtitle loader if it's a subtitle file
   const ext = file.name.split('.').pop().toLowerCase()
   if (ext === 'srt' || ext === 'vtt') {
@@ -284,7 +287,6 @@ btnFullscreen.addEventListener('click', () => {
 document.addEventListener('fullscreenchange', () => {
   btnFullscreen.textContent = document.fullscreenElement ? '✕' : '⛶'
   btnFullscreen.setAttribute('aria-label', document.fullscreenElement ? 'Exit fullscreen' : 'Enter fullscreen')
-
 })
 
 // ── File Input ───────────────────────────────────────────────────

@@ -35,6 +35,9 @@ const roomState = {
 
   // Connection
   wsStatus: 'disconnected', // 'disconnected' | 'connecting' | 'connected'
+
+  // Clock
+  clockOffset: 0, // ms offset between server clock and local clock
 }
 
 // ── Event Bus ────────────────────────────────────────────────────
@@ -56,11 +59,12 @@ const resetRoomState = () => {
     roomState.members      = []
     roomState.playback     = { playing: false, position: 0, serverTime: null }
     roomState.file         = null
-    if (roomState.blobUrl) URL.revokeObjectURL(roomState.blobUrl) 
+    if (roomState.blobUrl) URL.revokeObjectURL(roomState.blobUrl)
     roomState.blobUrl      = null
     roomState.fileReady    = false
     roomState.fileHash     = null
     roomState.fileState    = FILE_STATES.WAITING
+    roomState.clockOffset  = 0  // clear offset on leave — stale value must not affect next join
     // one notifyUpdate() at the end, not one per field
     notifyUpdate()
 }

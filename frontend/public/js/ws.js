@@ -31,6 +31,7 @@ const getBackoff = (attempt) => {
 //
 // Other modules register handlers via onMessage(type, fn).
 // ws.js routes incoming messages to them by type.
+// handlers is a plain object — registering the same type twice overwrites.
 // Unknown types are silently dropped.
 
 const handlers = {}
@@ -113,7 +114,7 @@ const connect = (roomCode, name) => {
     ws = null
     setWsStatus('disconnected')
     if (!manualClose) scheduleReconnect(roomCode, name)
-}
+  }
 
   ws.onerror = () => {
     // onerror always fires before onclose — let onclose drive reconnect logic
@@ -155,12 +156,29 @@ onMessage('session_token', (payload) => {
 
 onMessage('session_init', (payload) => {
   if (payload.userId) roomState.myUserId = payload.userId
+  // Initiate clock sync now — hub has processed join and session_init has arrived.
+  // Never sent on ws.onopen: hub requires join as the first message.
+  wsSend('clock_sync', { clientTime: Date.now() })
   // no notifyUpdate here — room_state arrives immediately after and will trigger it
+})
+
+onMessage('clock_sync', (payload) => {
+  // Compute one-way latency assuming symmetric paths.
+  // Asymmetric routes (mobile/satellite) may bias offset by ~50ms — acceptable for v1.
+  const roundTrip = Date.now() - payload.clientTime
+  const latency   = roundTrip / 2
+  roomState.clockOffset = payload.serverTime - (payload.clientTime + latency)
+
+  // Notify sync.js to reset its localApplyTime baseline.
+  // Using a CustomEvent keeps modules decoupled — sync.js listens here,
+  // ws.js does not call into sync.js directly, and the handlers object
+  // is not double-registered for 'clock_sync'.
+  document.dispatchEvent(new CustomEvent('ws:clock_sync'))
 })
 
 onMessage('room_state', (payload) => {
   setMembers(payload.members ?? [])
-  // playback applied in sync.js (step 4) — ignored here for now
+  // playback applied in sync.js — ignored here
 })
 
 onMessage('user_joined', (payload) => {
