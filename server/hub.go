@@ -26,15 +26,18 @@ func newUpgrader(allowedOrigin string) websocket.Upgrader {
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
+// Step 1 — rate-limit fields added to Client
 type Client struct {
-	userId       string
-	name         string
-	roomCode     string
-	sessionToken string // held in memory; written to Redis only on disconnect
-	isReconnect  bool
-	conn         *websocket.Conn
-	send         chan []byte
-	hub          *Hub
+	userId          string
+	name            string
+	roomCode        string
+	sessionToken    string // held in memory; written to Redis only on disconnect
+	isReconnect     bool
+	conn            *websocket.Conn
+	send            chan []byte
+	hub             *Hub
+	lastSyncWindow  int64 // unix ms — start of current 1-second rate-limit window
+	syncCount       int   // commands received in the current window
 }
 
 type Message struct {
@@ -43,14 +46,23 @@ type Message struct {
 	data         []byte
 }
 
+// Step 2 — RoomPlaybackState struct
+type RoomPlaybackState struct {
+	LastRecordedPosition float64 // seconds — canonical position at RecordedAt
+	RecordedAt           int64   // unix ms — when this position was recorded
+	IsPlaying            bool    // true = playing, false = paused
+}
+
+// Step 2 — playbackStates added to Hub
 type Hub struct {
-	mu 		   sync.RWMutex
-	rooms      map[string]map[string]*Client // roomCode → userId → *Client
-	hostIds    map[string]string             // roomCode → userId (current host)
-	rdb        *redis.Client                 // needed for session writes on drop
-	register   chan *Client
-	unregister chan *Client
-	broadcast  chan *Message
+	mu             sync.RWMutex
+	rooms          map[string]map[string]*Client   // roomCode → userId → *Client
+	hostIds        map[string]string               // roomCode → userId (current host)
+	playbackStates map[string]RoomPlaybackState    // roomCode → playback state
+	rdb            *redis.Client                   // needed for session writes on drop
+	register       chan *Client
+	unregister     chan *Client
+	broadcast      chan *Message
 }
 
 // ── Envelope ──────────────────────────────────────────────────────────────────
@@ -70,12 +82,13 @@ func makeEnvelope(msgType string, payload interface{}) []byte {
 
 func newHub(rdb *redis.Client) *Hub {
 	return &Hub{
-		rooms:      make(map[string]map[string]*Client),
-		hostIds:    make(map[string]string),
-		rdb:        rdb,
-		register:   make(chan *Client),
-		unregister: make(chan *Client),
-		broadcast:  make(chan *Message, 256),
+		rooms:          make(map[string]map[string]*Client),
+		hostIds:        make(map[string]string),
+		playbackStates: make(map[string]RoomPlaybackState), // Step 2
+		rdb:            rdb,
+		register:       make(chan *Client),
+		unregister:     make(chan *Client),
+		broadcast:      make(chan *Message, 256),
 	}
 }
 
@@ -168,6 +181,26 @@ func (h *Hub) handleRegister(client *Client) {
 		"members": members,
 	})
 
+	// Step 4 — send sync_state to late joiner if room has playback state
+	h.mu.RLock()
+	state, exists := h.playbackStates[client.roomCode]
+	h.mu.RUnlock()
+
+	if exists {
+		now := time.Now().UnixMilli()
+		position := state.LastRecordedPosition
+		if state.IsPlaying {
+			elapsed := float64(now-state.RecordedAt) / 1000.0
+			position = position + elapsed
+		}
+		// Compute position locally for this send — do NOT persist the rebase.
+		client.send <- makeEnvelope("sync_state", map[string]interface{}{
+			"action":    "seek",
+			"position":  position,
+			"isPlaying": state.IsPlaying,
+		})
+	}
+
 	// Broadcast to everyone else in the room
 	msg := makeEnvelope(func() string {
 		if client.isReconnect {
@@ -216,7 +249,6 @@ func (h *Hub) handleBroadcast(msg *Message) {
 			// Delivered to buffer — Hub moves on immediately
 		default:
 			// Buffer full — client is too slow or dead — drop it.
-			// Write session now since handleUnregister will never be called for this client.
 			toDrop = append(toDrop, client)
 		}
 	}
@@ -271,11 +303,100 @@ func (h *Hub) broadcastToOthers(roomCode, excludeUserId string, data []byte) {
 	}
 }
 
-// ── Session Write on Disconnect ───────��───────────────────────────────────────
+// ── Step 3 — handleSyncCommand ────────────────────────────────────────────────
 //
-// Called in handleUnregister and in every broadcast drop path.
-// This is the single place where a session token is written to Redis —
-// only when the client actually disconnects, starting the reconnect TTL clock.
+// Called directly from readPump (per-client goroutine).
+// Does NOT go through the broadcast channel — broadcastToRoom includes sender.
+
+func (h *Hub) handleSyncCommand(c *Client, raw json.RawMessage) {
+	var p struct {
+		Action   string  `json:"action"`
+		Position float64 `json:"position"`
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return
+	}
+
+	// Validate action
+	validActions := map[string]bool{"play": true, "pause": true, "seek": true}
+	if !validActions[p.Action] {
+		return
+	}
+
+	// Rate limit — max 5 sync commands per second per client
+	// lastSyncWindow and syncCount are read/written only in readPump — no mutex needed
+	now := time.Now().UnixMilli()
+	if now-c.lastSyncWindow > 1000 {
+		c.lastSyncWindow = now
+		c.syncCount = 0
+	}
+	c.syncCount++
+	if c.syncCount > 5 {
+		return
+	}
+
+	h.mu.Lock()
+	state, exists := h.playbackStates[c.roomCode]
+	if !exists {
+		state = RoomPlaybackState{
+			LastRecordedPosition: 0,
+			RecordedAt:           now,
+			IsPlaying:            false,
+		}
+	}
+
+	var broadcastPosition float64
+	var broadcastIsPlaying bool
+
+	switch p.Action {
+	case "play":
+		// Silent drop if already playing
+		if state.IsPlaying {
+			h.mu.Unlock()
+			return
+		}
+		broadcastPosition = state.LastRecordedPosition
+		state.RecordedAt = now
+		state.IsPlaying = true
+		broadcastIsPlaying = true
+
+	case "pause":
+		// Silent drop if already paused
+		if !state.IsPlaying {
+			h.mu.Unlock()
+			return
+		}
+		elapsed := float64(now-state.RecordedAt) / 1000.0
+		state.LastRecordedPosition = state.LastRecordedPosition + elapsed
+		state.RecordedAt = now
+		state.IsPlaying = false
+		broadcastPosition = state.LastRecordedPosition
+		broadcastIsPlaying = false
+
+	case "seek":
+		if p.Position < 0 || p.Position >= 86400 {
+			h.mu.Unlock()
+			return
+		}
+		state.LastRecordedPosition = p.Position
+		state.RecordedAt = now
+		// isPlaying remains unchanged
+		broadcastPosition = p.Position
+		broadcastIsPlaying = state.IsPlaying
+	}
+
+	h.playbackStates[c.roomCode] = state
+	h.mu.Unlock()
+
+	// Broadcast to all clients including sender
+	h.broadcastToRoom(c.roomCode, makeEnvelope("sync_command", map[string]interface{}{
+		"action":    p.Action,
+		"position":  broadcastPosition,
+		"isPlaying": broadcastIsPlaying,
+	}))
+}
+
+// ── Session Write on Disconnect ───────────────────────────────────────────────
 
 func writeSessionOnDisconnect(ctx context.Context, rdb *redis.Client, client *Client) {
 	if client.sessionToken == "" {
@@ -293,19 +414,18 @@ func writeSessionOnDisconnect(ctx context.Context, rdb *redis.Client, client *Cl
 
 func (h *Hub) dropClient(room map[string]*Client, client *Client) {
 	ctx := context.Background()
-	// Write session to Redis NOW — this is when the reconnect clock starts.
-	// The token was held in memory since connect; only at disconnect does it matter.
 	writeSessionOnDisconnect(ctx, h.rdb, client)
 
 	h.mu.Lock()
 	delete(room, client.userId)
 	remaining := len(room)
-	if(remaining == 0) {
+	if remaining == 0 {
 		delete(h.rooms, client.roomCode)
 		delete(h.hostIds, client.roomCode)
+		delete(h.playbackStates, client.roomCode) // Step 5 — prevent memory leak
 	}
 	h.mu.Unlock()
-	
+
 	close(client.send)
 
 	// Reset TTL on leave
@@ -330,15 +450,13 @@ func (h *Hub) dropClient(room map[string]*Client, client *Client) {
 		}
 	}
 
-	// Room is empty — clean up in-memory, let Redis TTL expire the key after 5 minutes
+	// Room is empty — let Redis TTL expire the key after 5 minutes
 	if remaining == 0 {
 		h.rdb.Expire(ctx, "room:"+client.roomCode, 5*time.Minute)
 	}
 }
 
-// ── Room Member Count ──────────────────────────────────
-//
-// This is the only public-facing read of the rooms map.
+// ── Room Member Count ─────────────────────────────────────────────────────────
 
 func (h *Hub) roomMemberCount(roomCode string) int {
 	h.mu.RLock()
@@ -363,9 +481,8 @@ func (h *Hub) handleHeartbeat() {
 
 func handleWebSocket(hub *Hub, rdb *redis.Client, upgrader websocket.Upgrader) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Extract room code from path — /ws/:code
 		code := r.URL.Path[len("/ws/"):]
-		code = sanitizeName(code) // trim whitespace
+		code = sanitizeName(code)
 		code = stringToUpper(code)
 
 		if !validRoomCode(code) {
@@ -375,27 +492,23 @@ func handleWebSocket(hub *Hub, rdb *redis.Client, upgrader websocket.Upgrader) h
 
 		ctx := r.Context()
 
-		// Room must exist in Redis before a WebSocket is accepted
 		exists, err := roomExists(ctx, rdb, code)
 		if err != nil || !exists {
 			http.Error(w, "Room not found", http.StatusNotFound)
 			return
 		}
 
-		// Enforce member cap BEFORE upgrading — reject at HTTP level
 		if hub.roomMemberCount(code) >= MaxRoomMembers {
 			http.Error(w, "Room is full", http.StatusForbidden)
 			return
 		}
 
-		// Upgrade to WebSocket
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			log.Printf("hub: upgrade failed — %v", err)
 			return
 		}
 
-		// Per-connection constraints
 		conn.SetReadLimit(MaxMessageSize)
 		conn.SetReadDeadline(time.Now().Add(PongWait * time.Second))
 		conn.SetPongHandler(func(string) error {
@@ -403,7 +516,6 @@ func handleWebSocket(hub *Hub, rdb *redis.Client, upgrader websocket.Upgrader) h
 			return nil
 		})
 
-		// Read the first message — must be a join
 		_, raw, err := conn.ReadMessage()
 		if err != nil {
 			conn.Close()
@@ -441,7 +553,6 @@ func handleWebSocket(hub *Hub, rdb *redis.Client, upgrader websocket.Upgrader) h
 			return
 		}
 
-		// Resolve identity — reconnect or fresh join
 		var userID, sessionToken string
 		var isReconnect bool
 
@@ -451,16 +562,14 @@ func handleWebSocket(hub *Hub, rdb *redis.Client, upgrader websocket.Upgrader) h
 				log.Printf("hub: session retrieve error — %v", err)
 			}
 			if session != nil && session.RoomCode == code {
-				// Valid reconnect — restore identity, hold new token in memory
 				userID = session.UserID
 				sessionToken = newToken
-				name = session.Name // always restore original name
+				name = session.Name
 				isReconnect = true
 			}
 		}
 
 		if userID == "" {
-			// Fresh join — generate identity and token
 			uid, token, err := newSession()
 			if err != nil {
 				log.Printf("hub: session create error — %v", err)
@@ -480,15 +589,13 @@ func handleWebSocket(hub *Hub, rdb *redis.Client, upgrader websocket.Upgrader) h
 			userId:       userID,
 			name:         name,
 			roomCode:     code,
-			sessionToken: sessionToken, // held in memory until disconnect
+			sessionToken: sessionToken,
 			isReconnect:  isReconnect,
 			conn:         conn,
 			send:         make(chan []byte, SendBufferSize),
 			hub:          hub,
 		}
 
-		// Send session token to client before registering with Hub
-		// so the client can store it before any room events arrive
 		conn.WriteMessage(websocket.TextMessage,
 			makeEnvelope("session_token", map[string]string{
 				"sessionToken": sessionToken,
@@ -496,10 +603,7 @@ func handleWebSocket(hub *Hub, rdb *redis.Client, upgrader websocket.Upgrader) h
 
 		hub.register <- client
 
-		// Start write pump in its own goroutine
 		go client.writePump()
-
-		// Read pump runs on the current goroutine — blocks until disconnect
 		client.readPump()
 	}
 }
@@ -515,18 +619,15 @@ func (c *Client) readPump() {
 	for {
 		_, raw, err := c.conn.ReadMessage()
 		if err != nil {
-			// Normal disconnect or read deadline exceeded — exit cleanly
 			break
 		}
 
 		var env Envelope
 		if err := json.Unmarshal(raw, &env); err != nil {
-			// Malformed message — drop silently, keep connection alive
 			continue
 		}
 
-		// Only relay is handled in Step 1
-		// Step 3 will add: play, pause, seek
+		// Step 3 — sync_command added alongside relay
 		switch env.Type {
 		case "relay":
 			c.hub.broadcast <- &Message{
@@ -534,6 +635,8 @@ func (c *Client) readPump() {
 				senderUserId: c.userId,
 				data:         raw,
 			}
+		case "sync_command":
+			c.hub.handleSyncCommand(c, env.Payload)
 		default:
 			// Unknown type — drop silently
 		}
@@ -548,7 +651,6 @@ func (c *Client) writePump() {
 	for msg := range c.send {
 		c.conn.SetWriteDeadline(time.Now().Add(WriteWait * time.Second))
 		if err := c.conn.WriteMessage(websocket.TextMessage, msg); err != nil {
-			// Write failed — connection is dead
 			break
 		}
 	}
