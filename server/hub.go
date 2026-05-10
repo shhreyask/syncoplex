@@ -46,20 +46,20 @@ type Message struct {
 	data         []byte
 }
 
-// Step 2 — RoomPlaybackState struct
+
 type RoomPlaybackState struct {
-	LastRecordedPosition float64 // seconds — canonical position at RecordedAt
-	RecordedAt           int64   // unix ms — when this position was recorded
-	IsPlaying            bool    // true = playing, false = paused
+	LastRecordedPosition float64 
+	RecordedAt           int64   
+	IsPlaying            bool    
 }
 
-// Step 2 — playbackStates added to Hub
+
 type Hub struct {
 	mu             sync.RWMutex
-	rooms          map[string]map[string]*Client   // roomCode → userId → *Client
-	hostIds        map[string]string               // roomCode → userId (current host)
-	playbackStates map[string]RoomPlaybackState    // roomCode → playback state
-	rdb            *redis.Client                   // needed for session writes on drop
+	rooms          map[string]map[string]*Client   
+	hostIds        map[string]string               
+	playbackStates map[string]RoomPlaybackState    
+	rdb            *redis.Client                   
 	register       chan *Client
 	unregister     chan *Client
 	broadcast      chan *Message
@@ -84,7 +84,7 @@ func newHub(rdb *redis.Client) *Hub {
 	return &Hub{
 		rooms:          make(map[string]map[string]*Client),
 		hostIds:        make(map[string]string),
-		playbackStates: make(map[string]RoomPlaybackState), // Step 2
+		playbackStates: make(map[string]RoomPlaybackState),
 		rdb:            rdb,
 		register:       make(chan *Client),
 		unregister:     make(chan *Client),
@@ -181,7 +181,6 @@ func (h *Hub) handleRegister(client *Client) {
 		"members": members,
 	})
 
-	// Step 4 — send sync_state to late joiner if room has playback state
 	h.mu.RLock()
 	state, exists := h.playbackStates[client.roomCode]
 	h.mu.RUnlock()
@@ -303,10 +302,7 @@ func (h *Hub) broadcastToOthers(roomCode, excludeUserId string, data []byte) {
 	}
 }
 
-// ── Step 3 — handleSyncCommand ────────────────────────────────────────────────
-//
-// Called directly from readPump (per-client goroutine).
-// Does NOT go through the broadcast channel — broadcastToRoom includes sender.
+// ── Sync Helper ────────────────────────────────────────────────
 
 func (h *Hub) handleSyncCommand(c *Client, raw json.RawMessage) {
 	var p struct {
@@ -422,7 +418,7 @@ func (h *Hub) dropClient(room map[string]*Client, client *Client) {
 	if remaining == 0 {
 		delete(h.rooms, client.roomCode)
 		delete(h.hostIds, client.roomCode)
-		delete(h.playbackStates, client.roomCode) // Step 5 — prevent memory leak
+		delete(h.playbackStates, client.roomCode)
 	}
 	h.mu.Unlock()
 
