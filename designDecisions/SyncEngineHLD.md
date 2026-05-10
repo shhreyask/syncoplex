@@ -56,12 +56,6 @@ The flow:
 
 ---
 
-## No Clock Sync
-
-The previous design used a clock sync handshake to compute an offset between client and server clocks. This is **removed entirely**. The server computes all positions. Clients never interpret `serverTime` — they only use the `position` value the server sends. No `clockOffset`, no `latencyOffset`, no round-trip estimation.
-
----
-
 ## Message Protocol
 
 All messages use the existing `{ type, payload }` envelope from Step 1.

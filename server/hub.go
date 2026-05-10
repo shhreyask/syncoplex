@@ -623,7 +623,6 @@ func (c *Client) readPump() {
 			continue
 		}
 
-		// Step 3 — sync_command added alongside relay
 		switch env.Type {
 		case "relay":
 			c.hub.broadcast <- &Message{
