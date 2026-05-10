@@ -173,12 +173,13 @@ seekBar.addEventListener('input', () => {
 
 seekBar.addEventListener('pointerup', () => {
   dispatchPlayerAction('seek', video.currentTime)
+  seekBar.blur()
 })
 
 // ── Play / Pause Button ──────────────────────────────────────────
 
 btnPlayPause.addEventListener('click', () => {
-  if (video.paused) {
+  if (!roomState.playback.playing) {
     dispatchPlayerAction('play')
   } else {
     dispatchPlayerAction('pause')

@@ -21,8 +21,14 @@ let lastApply = { position: 0, localTime: 0 }
 // Stores a sync message received before video metadata has loaded.
 // Re-applied on loadedmetadata. Without this, seekTo is silently
 // ignored by the browser and the user starts at position 0.
+//
+// pendingSyncReceivedAt records performance.now() at the moment the
+// message was stored. On loadedmetadata, if the room was playing,
+// we fast-forward position by the elapsed time — otherwise the late
+// joiner lands 5-10+ seconds behind (the file-pick delay).
 
 let pendingSync = null
+let pendingSyncReceivedAt = 0
 
 // ── Player Action → Server ───────────────────────────────────────
 //
@@ -63,12 +69,23 @@ video.addEventListener('ended', () => {
 // ── Deferred Apply ───────────────────────────────────────────────
 //
 // If a sync message arrived before video metadata loaded, re-apply it
-// now. Common for late joiners on slow connections.
+// now. Common for late joiners who haven't picked a file yet.
+//
+// If the room was playing, fast-forward position by the time elapsed
+// since the message was received — the server computed position X at
+// join time, but the user may have spent several seconds picking a file
+// before loadedmetadata fired. Without this correction the late joiner
+// lands that many seconds behind.
 
 video.addEventListener('loadedmetadata', () => {
   if (pendingSync) {
+    if (pendingSync.isPlaying) {
+      const elapsed = (performance.now() - pendingSyncReceivedAt) / 1000
+      pendingSync = { ...pendingSync, position: pendingSync.position + elapsed }
+    }
     applySync(pendingSync)
     pendingSync = null
+    pendingSyncReceivedAt = 0
   }
 })
 
@@ -82,6 +99,7 @@ function applySync(msg) {
   // Defer until loadedmetadata fires.
   if (video.readyState < 1) {
     pendingSync = msg
+    pendingSyncReceivedAt = performance.now()
     return
   }
 
