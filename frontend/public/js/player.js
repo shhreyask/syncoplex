@@ -170,23 +170,19 @@ seekBar.addEventListener('input', () => {
   updateRangeFill(seekBar)
 })
 
-seekBar.addEventListener('change', () => {
+
+seekBar.addEventListener('pointerup', () => {
   dispatchPlayerAction('seek', video.currentTime)
+  seekBar.blur()
 })
 
 // ── Play / Pause Button ──────────────────────────────────────────
 
 btnPlayPause.addEventListener('click', () => {
-  if (video.paused) {
-    video.play().catch(err => {
-      if (err.name !== 'AbortError') console.error('player: play failed —', err)
-    })
-    dispatchPlayerAction('play', video.currentTime)
-    btnPlayPause.setAttribute('aria-label', 'Pause')
+  if (!roomState.playback.playing) {
+    dispatchPlayerAction('play')
   } else {
-    video.pause()
-    dispatchPlayerAction('pause', video.currentTime)
-    btnPlayPause.setAttribute('aria-label', 'Play')
+    dispatchPlayerAction('pause')
   }
 })
 
@@ -261,7 +257,6 @@ viewWatch.addEventListener('drop', (e) => {
   const file = e.dataTransfer.files[0]
   if (!file) return
 
-  
   // Route to subtitle loader if it's a subtitle file
   const ext = file.name.split('.').pop().toLowerCase()
   if (ext === 'srt' || ext === 'vtt') {
@@ -284,7 +279,6 @@ btnFullscreen.addEventListener('click', () => {
 document.addEventListener('fullscreenchange', () => {
   btnFullscreen.textContent = document.fullscreenElement ? '✕' : '⛶'
   btnFullscreen.setAttribute('aria-label', document.fullscreenElement ? 'Exit fullscreen' : 'Enter fullscreen')
-
 })
 
 // ── File Input ───────────────────────────────────────────────────

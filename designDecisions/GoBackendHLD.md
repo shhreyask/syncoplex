@@ -1,4 +1,4 @@
-## Go Backend — Complete Revised Design Document
+# Go Backend — Complete Design Document
 
 ---
 
@@ -42,7 +42,7 @@ Three dependencies. That is the entire external surface area of this server.
 │                   WebSocket Layer                        │
 │       One persistent connection per user per session     │
 │       Single message envelope for all event types        │
-│       Hub goroutine owns all broadcast logic             │
+│       Hub goroutine owns all state via typed event loop  │
 │       Buffered per-client write channels                 │
 └───────────────────────────┬──────────────────────────────┘
                             │
@@ -64,10 +64,10 @@ Each layer has one responsibility and never bleeds into another.
 ```
 server/
 ├── main.go           Starts the server, wires routes, connects Redis
-├── config.go         Environment variables, constants, room cap
+├── config.go         Environment variables, constants, room cap, playback limits
 ├── redis.go          go-redis singleton, connection config, pool sizing
 ├── rooms.go          Code generation, Redis read/write, room validation
-├── hub.go            In-memory connection map, broadcast logic, host migration, WebSocket handler, read/write pumps
+├── hub.go            Hub struct, event loop, all hub handlers, WebSocket handler, read/write pumps
 ├── session.go        Session token issuance, reconnect identity claims
 └── middleware.go     Rate limiting, security headers, CORS, input validation
 ```
@@ -77,8 +77,6 @@ Every file has one clear owner. None of them know about the internals of the oth
 ---
 
 ## Source of Truth — Strict Separation
-
-This is the most important architectural decision in the document:
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -93,7 +91,7 @@ This is the most important architectural decision in the document:
 └──────────────────────────────────┴──────────────────────┘
 ```
 
-The Hub is the sole source of truth for live membership. Redis never tracks who is connected. This eliminates the restart divergence problem entirely — the Hub starts empty on restart, users reconnect through the normal join flow, and the Hub repopulates itself naturally. Redis room metadata survives the restart correctly because it's the right thing to persist.
+The Hub is the sole source of truth for live membership. Redis never tracks who is connected. This eliminates the restart divergence problem entirely — the Hub starts empty on restart, users reconnect through the normal join flow, and the Hub repopulates itself naturally.
 
 ---
 
@@ -104,7 +102,7 @@ room:{code}     Hash    { hostId, createdAt, status }
 session:{token} String  { userId, name, roomCode }    TTL: 5 minutes
 ```
 
-The `room:{code}:members` Set from the original design is **removed entirely.** Redis does not track live membership.
+The `room:{code}:members` Set is **removed entirely.** Redis does not track live membership.
 
 ### hostId Lifecycle
 
@@ -130,45 +128,24 @@ redis.NewClient(&redis.Options{
 })
 ```
 
-The pool is intentionally small. This is a single-process server; there is no need for a large pool.
-
 ### TTL Strategy
 
 ```
 room:{code}        6 hour TTL
                    Reset ONLY on: user join, user leave, 30-minute heartbeat
                    Never reset on relay messages — those are high frequency
-                   Collapses to 5 minute TTL after a room empties so there
-                   are no dangling rooms
+                   Collapses to 5 minute TTL after a room empties
 
 session:{token}    5 minute TTL
                    Written to Redis only when the client disconnects — this is
                    when the reconnect window actually opens. The token is held
-                   in memory on the Client struct while the connection is live
-                   and never touches Redis until the Hub drops the client.
+                   in memory on the Client struct while the connection is live.
                    Expires automatically, no cleanup needed.
 ```
 
 Resetting TTL on every relay message at 30 messages/second/connection would mean thousands of unnecessary Redis round trips per minute. TTL is a lifecycle signal, not an activity ping.
 
-The session token is intentionally **not** written to Redis on connect. It only needs to exist during the window after a disconnect, so writing it earlier would be wasteful and misleading. The clock starts when it matters — at the moment of disconnect.
-
-### The Heartbeat
-
-```go
-func (h *Hub) handleHeartbeat() {
-    ctx := context.Background()
-    for roomCode, room := range h.rooms {
-        if len(room) > 0 {
-            if err := h.rdb.Expire(ctx, "room:"+roomCode, RoomTTL*time.Second).Err(); err != nil {
-                log.Printf("hub: TTL heartbeat failed for room %s — %v", roomCode, err)
-            }
-        }
-    }
-}
-```
-
-At 100 active rooms this is 100 Redis calls every 30 minutes. Effectively zero load.
+The session token is intentionally **not** written to Redis on connect. It only needs to exist during the window after a disconnect. The clock starts when it matters — at the moment of disconnect.
 
 ---
 
@@ -186,7 +163,7 @@ Two words from a curated list of 50 common animals + 6 random digits:
 
 Brute force is computationally unreasonable. Combined with rate limiting on the validation endpoint, room enumeration attacks are effectively impossible.
 
-**Why not UUIDs?** UUIDs are for machines. Room codes are typed and shared verbally between friends. They need to be human-readable and memorable.
+**Why not UUIDs?** UUIDs are for machines. Room codes are typed and shared verbally between friends.
 
 ---
 
@@ -194,7 +171,7 @@ Brute force is computationally unreasonable. Combined with rate limiting on the 
 
 **Hard cap: 6 members per room.**
 
-This is not a server constraint — the Go server is completely indifferent to room size. The cap exists because of the WebRTC full mesh topology used in Step 5:
+The cap exists because of WebRTC full mesh topology:
 
 ```
 N people → N×(N-1)/2 peer connections
@@ -205,45 +182,42 @@ N people → N×(N-1)/2 peer connections
 10 people →  45 connections
 ```
 
-In a full mesh every participant uploads directly to every other participant. At 6 people each user is uploading 5 simultaneous video+audio streams. Beyond 6, average home upload bandwidth and device CPU become real constraints for typical users.
+Beyond 6, average home upload bandwidth and device CPU become real constraints.
 
-### Two Layers of Enforcement
+### Three Layers of Enforcement
 
 **Layer 1 — GET /rooms/:code response:**
 ```json
 { "exists": true, "memberCount": 4, "full": false }
 ```
-The frontend shows "Room is full" before attempting a WebSocket connection. The member count is read from the Hub's live in-memory map — not from Redis.
+The frontend shows "Room is full" before attempting a WebSocket connection. Count is read from the Hub's live in-memory map via `roomMemberCount()` — not from Redis.
 
 **Layer 2 — WebSocket upgrade handler:**
 ```go
-// Check BEFORE upgrading — reject at HTTP level
 if hub.roomMemberCount(code) >= MaxRoomMembers {
     http.Error(w, "Room is full", http.StatusForbidden)
-    return  // connection never established
+    return
 }
 ```
-
-A 403 at HTTP level is cheaper than establishing and immediately closing a WebSocket. The client gets a clear signal it can handle gracefully.
+A 403 at HTTP level is cheaper than establishing and immediately closing a WebSocket.
 
 **Layer 3 — Hub handleRegister (final backstop):**
 ```go
-// Reconnecting clients are exempt — they are reclaiming an existing slot
 if !client.isReconnect && len(room) >= MaxRoomMembers {
-    // close and reject
+    // reject — close and signal error
 }
 ```
-
-The cap is re-checked atomically with the insert inside the Hub goroutine. Reconnecting clients bypass this check because they are reclaiming a slot that already existed, not adding a new one.
+The cap is re-checked atomically with the insert inside the Hub goroutine. Reconnecting clients bypass this check — they are reclaiming a slot that already existed.
 
 ---
 
 ## Session Tokens and Reconnection Identity
 
 ### The Problem
-Without session tokens, every WebSocket connect generates a fresh userId. A tab blip means Alice gets a new userId. The room briefly shows two Alices. In Step 5, WebRTC peer connections are keyed to userId — a reconnect breaks every peer connection.
 
-### The Solution — Session Tokens
+Without session tokens, every WebSocket connect generates a fresh userId. A tab blip means Alice gets a new userId. The room briefly shows two Alices. In Step 6, WebRTC peer connections are keyed to userId — a reconnect breaks every peer connection.
+
+### The Solution
 
 **First Connect:**
 ```
@@ -251,288 +225,319 @@ Client connects with no token
     │
     ▼
 Server generates:
-    userId        = UUID v4  (stable identity for this session)
-    sessionToken  = crypto/rand 32 bytes, hex encoded  (proves identity on reconnect)
+    userId        = UUID v4
+    sessionToken  = crypto/rand 32 bytes, hex encoded
 
-Token is held in memory on the Client struct.
-It is NOT written to Redis yet — there is nothing to reconnect to while connected.
+Token held in memory on Client struct — NOT written to Redis yet.
 
-Server sends session_token directly on the raw connection BEFORE registering with the Hub:
+conn.WriteMessage → { type: "session_token", payload: { sessionToken } }
+    ← sent on raw connection BEFORE Hub registration
+    ← client stores this before any room events arrive
 
-    conn.WriteMessage → { type: "session_token", payload: { sessionToken } }
-    ← client stores this BEFORE any room events arrive
-
-Then the client is registered with the Hub, which immediately sends:
-
-    client.send ← { type: "session_init", payload: { userId } }
-    client.send ← { type: "room_state", payload: { members: [...] } }
-
-Client stores sessionToken in sessionStorage
+hub.events <- RegisterEvent
+    Hub goroutine sends:
+        client.send ← { type: "session_init", payload: { userId } }
+        client.send ← { type: "room_state",   payload: { members: [...] } }
 ```
-
-The token is sent before Hub registration so the client has it before the first room event (`user_joined`, `room_state`) could trigger a reconnect attempt.
 
 **On Disconnect:**
 ```
 Hub calls dropClient(client)
     │
     ▼
-session:{token} → { userId, name, roomCode }  written to Redis with 5 min TTL
+session:{token} → { userId, name, roomCode }  written to Redis, 5 min TTL
     │
     ▼
-The reconnect clock starts here — not at connect time.
+Reconnect clock starts here — not at connect time.
 ```
-
-This is also handled for the edge case where a client is evicted from the broadcast loop due to a full send buffer — `writeSessionOnDisconnect` is called in every drop path, so the token always reaches Redis regardless of how the client exits.
 
 **Reconnect (within 5 minutes):**
 ```
-Client reconnects, sends token in first message:
-    { type: "join", payload: { name: "Alice", sessionToken: "abc123..." } }
+Client sends: { type: "join", payload: { name: "Alice", sessionToken: "abc..." } }
     │
-    ▼
-Server checks Redis: session:{token} exists?
+    ├── Token valid in Redis →
+    │       token deleted (one-time use)
+    │       fresh token issued, held in memory
+    │       userId/name restored, isReconnect = true
+    │       broadcast: user_reconnected (not user_joined)
+    │       WebRTC peer connections survive intact
     │
-    ├── YES → restore userId, name, roomCode
-    │         token is deleted immediately (one-time use)
-    │         a fresh token is issued and held in memory on the new Client
-    │         isReconnect = true on the Client struct
-    │         user rejoins as same identity
-    │         broadcast { type: "user_reconnected" } — not user_joined
-    │         peer connections in Step 5 survive intact
-    │
-    └── NO  → token expired or invalid
-              treat as fresh join, issue new userId and token
+    └── Token expired/invalid →
+            fresh join, new userId and token
 ```
 
 **Why sessionStorage and not localStorage:**
 ```
 sessionStorage  →  survives tab blip, network drop, browser refresh
                 →  cleared when tab is intentionally closed
-localStorage    →  persists forever, wrong behaviour for a session
+localStorage    →  persists forever, wrong semantics for an ephemeral session
 ```
-
-This is exactly the scoping you want. A genuine reconnect is seamless. A deliberate new session starts fresh.
 
 ---
 
 ## Host Role and Host Departure
 
-### Definition
-Host in v1 is not a permission gate — everyone in the room can control playback. Host is simply the room creator, stored in Redis for reference.
-
-### Why Define This Now
-Step 3 adds sync commands. "Who controls playback" needs a clear answer before that code is written.
-
-### Decision: Democratic Control, Automatic Migration
+Host in v1 is not a permission gate — **everyone in the room can control playback**. Host is simply the room creator, stored in Redis for reference.
 
 - Everyone can play/pause/seek — no host-only restrictions
 - When the host disconnects, host role migrates automatically to the next connected member
-- When the room empties, nothing is deleted — TTL handles cleanup
-
-```go
-func (h *Hub) dropClient(room map[string]*Client, client *Client) {
-    ctx := context.Background()
-
-    // Write session to Redis NOW — this is when the reconnect clock starts.
-    writeSessionOnDisconnect(ctx, h.rdb, client)
-
-    h.mu.Lock()
-    delete(room, client.userId)
-    remaining := len(room)
-    if remaining == 0 {
-        delete(h.rooms, client.roomCode)
-        delete(h.hostIds, client.roomCode)
-    }
-    h.mu.Unlock()
-
-    close(client.send)
-
-    // Reset TTL on leave
-    resetRoomTTL(ctx, h.rdb, client.roomCode)
-
-    // Broadcast user_left FIRST — before host migration, so clients
-    // always process membership loss before any role change
-    h.broadcastToRoom(client.roomCode, makeEnvelope("user_left", map[string]string{
-        "userId": client.userId,
-        "name":   client.name,
-    }))
-
-    // Then host migration
-    if client.userId == h.hostIds[client.roomCode] && len(room) > 0 {
-        for _, next := range room {
-            h.hostIds[client.roomCode] = next.userId
-            h.rdb.HSet(ctx, "room:"+client.roomCode, "hostId", next.userId)
-            h.broadcastToRoom(client.roomCode, makeEnvelope("host_changed", map[string]string{
-                "userId": next.userId,
-                "name":   next.name,
-            }))
-            break
-        }
-    }
-
-    // Room is empty — collapse Redis TTL to 5 minutes
-    if remaining == 0 {
-        h.rdb.Expire(ctx, "room:"+client.roomCode, 5*time.Minute)
-    }
-}
-```
-
-Note the ordering: `user_left` is always broadcast before `host_changed`. Clients receive membership updates before any role change.
+- `user_left` is always broadcast before `host_changed` — clients process membership loss before any role change
 
 ---
 
 ## The Hub — Concurrency Model
 
-The Hub is the central nervous system of the server. It is the only thing that ever reads or writes the live connection map.
+### The Event Loop
 
-### Why a Single Goroutine for the Hot Path
+The Hub is an event loop. One goroutine, one inbox (`h.events`), sequential dispatch. All hub state mutations happen on the hub goroutine — no locks needed for `h.rooms`, `h.hostIds`, or `h.playbackStates` within hub handlers.
 
-Shared mutable state protected by mutexes is a source of subtle production bugs — deadlocks, missed unlocks, lock contention under load. For the hot path (register, unregister, broadcast) a single Hub goroutine serialises all state changes, minimising the window in which the mutex is held.
+```go
+type HubEvent interface {
+    execute(h *Hub)
+}
+```
 
-A `sync.RWMutex` is used to protect the rooms map in `handleRegister` and `dropClient`, because `roomMemberCount` is called from HTTP handler goroutines and must read the map safely. The write lock is held only for the map insertion or deletion itself — all Redis calls and channel sends happen outside it.
+Four event types:
+
+| Event | Sent from | Handled by |
+|---|---|---|
+| `RegisterEvent{client}` | HTTP goroutine (handleWebSocket) | `handleRegister` |
+| `UnregisterEvent{client}` | readPump goroutine (deferred) | `handleUnregister` |
+| `RelayEvent{roomCode, senderUserId, data}` | readPump goroutine | `handleRelay` |
+| `SyncEvent{client, raw}` | readPump goroutine | `handleSyncCommand` |
+
+The run loop:
+
+```go
+func (h *Hub) run() {
+    ticker := time.NewTicker(30 * time.Minute)
+    defer ticker.Stop()
+    for {
+        select {
+        case ev := <-h.events:
+            ev.execute(h)
+        case <-ticker.C:
+            h.handleHeartbeat() // direct call — already on hub goroutine, no channel crossing needed
+        }
+    }
+}
+```
+
+**Why the heartbeat is a direct call and not a HeartbeatEvent:** the ticker fires on the hub goroutine via `ticker.C`. Sending a `HeartbeatEvent` into `h.events` would be a goroutine writing to its own channel — a deadlock if the buffer is full. The event channel exists to bridge goroutine boundaries safely. When you're already on the right goroutine, the channel is the wrong tool.
+
+**Why one channel replaces three:** the old design had `register chan *Client`, `unregister chan *Client`, and `broadcast chan *Message` — three separate inboxes for one entity that processes them one at a time anyway. The `select` in `run()` was already doing manual dispatch. The typed event channel makes the model explicit: one inbox, self-dispatching events. Adding a new event type in the future costs one struct and one `execute()` implementation — zero changes to `run()`, zero changes to other event types.
+
+### The Single Mutex
+
+`h.mu` has exactly one job: protecting `h.rooms` against `roomMemberCount` reads from HTTP handler goroutines. It is acquired for writes in `handleRegister` (insert) and `dropClient` (delete). It is acquired for reads in `roomMemberCount` only.
+
+`h.hostIds` and `h.playbackStates` are accessed exclusively on the hub goroutine — they need no synchronisation at all.
+
+```
+h.mu protects:   h.rooms writes ↔ roomMemberCount reads (HTTP goroutine)
+No mutex for:    h.hostIds        (hub goroutine only)
+                 h.playbackStates (hub goroutine only)
+```
 
 ### Data Structures
 
 ```go
 type Client struct {
-    userId       string
-    name         string
-    roomCode     string
-    sessionToken string          // held in memory; written to Redis only on disconnect
-    isReconnect  bool            // true when this connect is reclaiming an existing identity
-    conn         *websocket.Conn
-    send         chan []byte      // buffered — Hub never blocks on this client
-    hub          *Hub
+    userId         string
+    name           string
+    roomCode       string
+    sessionToken   string          // held in memory; written to Redis only on disconnect
+    isReconnect    bool
+    conn           *websocket.Conn
+    send           chan []byte      // buffered — Hub never blocks on this client
+    hub            *Hub
+    lastSyncWindow time.Time       // monotonic — start of current rate-limit window
+    syncCount      int             // commands received in the current window
 }
 
-type Message struct {
-    roomCode     string
-    senderUserId string
-    data         []byte
+type RoomPlaybackState struct {
+    LastRecordedPosition float64
+    RecordedAt           time.Time  // time.Time preserves the monotonic clock reading
+    IsPlaying            bool       // elapsed = now.Sub(RecordedAt).Seconds() — NTP-immune
+}
+
+// SyncCommandPayload is used for both sync_command and sync_state messages.
+// Typed struct instead of map[string]interface{} — zero heap allocation per broadcast.
+type SyncCommandPayload struct {
+    Action    string  `json:"action"`
+    Position  float64 `json:"position"`
+    IsPlaying bool    `json:"isPlaying"`
 }
 
 type Hub struct {
-    mu         sync.RWMutex
-    rooms      map[string]map[string]*Client // roomCode → userId → *Client
-    hostIds    map[string]string             // roomCode → userId (current host)
-    rdb        *redis.Client                 // needed for session writes on drop
-    register   chan *Client
-    unregister chan *Client
-    broadcast  chan *Message                  // buffered (256)
+    mu             sync.RWMutex
+    rooms          map[string]map[string]*Client
+    hostIds        map[string]string
+    playbackStates map[string]RoomPlaybackState
+    rdb            *redis.Client
+    events         chan HubEvent   // single inbox, buffered (512)
 }
 ```
 
-`countQuery` and a separate `CountRequest` type were considered but not implemented. Live member count for HTTP handlers is served via `roomMemberCount()` using `RLock` on the same mutex.
+**Why `RoomPlaybackState.RecordedAt` is `time.Time` not `int64`:** Go's `time.Time` preserves the monotonic clock reading captured at `time.Now()`. All elapsed calculations use `now.Sub(state.RecordedAt).Seconds()`, which compares monotonic readings and is completely immune to NTP corrections, DST transitions, and manual clock adjustments. Using `time.Now().UnixMilli()` (int64) strips the monotonic component — an NTP step backward during a session would make elapsed go negative, corrupting `LastRecordedPosition` for every client in the room.
 
 ### Goroutine Topology
 
 ```
 ┌─────────────────────────────────────────────┐
 │  Hub Goroutine  (1, runs for server lifetime)│
-│  Serialises all register/unregister/broadcast│
+│  Owns all hub state exclusively              │
+│  Processes events from h.events sequentially │
+│  Heartbeat via direct ticker.C case          │
 └─────────────────────────────────────────────┘
 
 Per connected user (2 goroutines each):
 
 ┌──────────────┐      ┌──────────────┐
-│  Read Loop   │      │  Write Loop  │
+│  readPump    │      │  writePump   │
 │              │      │              │
 │  Blocks on   │      │  Blocks on   │
 │  WebSocket   │      │  send chan   │
 │  read        │      │              │
-│  Puts msgs   │      │  Writes to   │
-│  on Hub      │      │  WebSocket   │
-│  channel     │      │  conn        │
+│  Sends typed │      │  Writes to   │
+│  HubEvents   │      │  WebSocket   │
+│  to h.events │      │  conn        │
 └──────────────┘      └──────────────┘
 ```
 
 ### The Critical Broadcast Pattern
 
-The Hub **never writes to a WebSocket directly.** It only puts messages into each client's buffered send channel and moves on immediately. Relay messages exclude the sender. Clients whose buffers are full are collected into a `toDrop` slice and dropped after the range loop completes — never during iteration:
+The Hub **never writes to a WebSocket directly.** It puts messages into each client's buffered `send` channel and moves on immediately. Clients whose buffers are full are collected into a `toDrop` slice and dropped after the range loop — never during iteration.
 
 ```go
-case msg := <-h.broadcast:
-    if room, ok := h.rooms[msg.roomCode]; ok {
-        var toDrop []*Client
-        for _, client := range room {
-            if client.userId == msg.senderUserId {
-                continue // never echo back to sender
-            }
-            select {
-            case client.send <- msg.data:
-                // Delivered to buffer — Hub moves on immediately
-            default:
-                // Buffer full — client is too slow or dead
-                toDrop = append(toDrop, client)
-            }
-        }
-        for _, client := range toDrop {
-            h.dropClient(room, client)
-        }
+for _, client := range room {
+    select {
+    case client.send <- data:
+        // Delivered to buffer — Hub moves on immediately
+    default:
+        // Buffer full — client is too slow or dead
+        toDrop = append(toDrop, client)
     }
-```
-
-The `select` with `default` is the most important detail in the entire codebase. A slow or dead client never stalls the Hub. The Hub never waits on any individual connection. Every other room and every other user is completely unaffected by one bad connection.
-
-The per-client write loop drains the send channel at its own pace, independently:
-
-```go
-func (c *Client) writePump() {
-    defer c.conn.Close()
-    for msg := range c.send {
-        c.conn.SetWriteDeadline(time.Now().Add(WriteWait * time.Second))
-        if err := c.conn.WriteMessage(websocket.TextMessage, msg); err != nil {
-            // Write failed — connection is dead
-            break
-        }
-    }
+}
+for _, client := range toDrop {
+    h.dropClient(room, client)
 }
 ```
 
-If the write deadline is exceeded the connection is dropped. The Hub already moved on.
+The `select` with `default` is the most important detail in the entire codebase. A slow or dead client never stalls the Hub. Every other room and every other user is completely unaffected.
 
-### The Stale Client Guard in handleUnregister
+### The Stale Client Guard
 
-When a client reconnects, the new `*Client` pointer replaces the old one in the room map before the old read pump goroutine finishes. Without a guard, the old pump's deferred `unregister <- c` would evict the newly registered client:
+When a client reconnects, the new `*Client` pointer replaces the old one in the room map before the old readPump finishes. Without a guard, the old pump's deferred `UnregisterEvent` would evict the newly registered client:
 
 ```go
 func (h *Hub) handleUnregister(client *Client) {
     room, ok := h.rooms[client.roomCode]
-    if !ok {
-        return
-    }
-    // Only unregister if this pointer is still the active one for this userId.
-    // A reconnect may have already replaced it.
+    if !ok { return }
     if existing, exists := room[client.userId]; !exists || existing != client {
-        return
+        return // stale pointer — a reconnect already replaced this client
     }
     h.dropClient(room, client)
 }
 ```
 
-This guards the reconnect race condition where the old read pump exits slightly after the new client has already registered.
+---
 
-### Goroutine and Memory Count at Scale
+## Sync Engine — Server Side
+
+### Room Playback State
+
+One `RoomPlaybackState` per room, stored in `h.playbackStates` on the Hub. Hub-goroutine-only — no mutex needed.
 
 ```
-100 rooms × 4 users average × 2 goroutines = 800 goroutines
-800 goroutines × ~4KB stack each           = ~3.2MB
-
-Hub goroutine                               = 1 goroutine
-TTL heartbeat goroutine                     = 1 goroutine
-
-Total goroutines at 100 rooms              = 801
-Total goroutine memory                     = ~3.2MB
+State fields:
+    LastRecordedPosition float64    canonical position at RecordedAt
+    RecordedAt           time.Time  when this position was recorded (monotonic)
+    IsPlaying            bool       true = playing, false = paused
 ```
 
-This is negligible. The model scales to thousands of rooms on the cheapest available VPS.
+**Initialisation:** written on the first `sync_command` received for a room with no existing playback state. Defaults to position 0, paused.
+
+**Cleanup:** deleted in `dropClient` when the room empties — prevents unbounded map growth on a long-running server with many transient rooms.
+
+### Rate Limiting
+
+Max 5 sync commands per second per client. Enforced in `handleSyncCommand` before any state mutation:
+
+```
+lastSyncWindow  time.Time   start of the current 1-second window (monotonic)
+syncCount       int         commands received in the current window
+```
+
+Both fields live on `Client` and are read/written only in `handleSyncCommand`, which runs on the hub goroutine. No mutex needed.
+
+Rate comparison uses `now.Sub(c.lastSyncWindow) > time.Second` — monotonic arithmetic, immune to clock adjustments.
+
+### Command Processing
+
+```
+play  →  silent drop if already playing
+         broadcastPosition = LastRecordedPosition (unchanged — pause recorded it)
+         RecordedAt = now, IsPlaying = true
+
+pause →  silent drop if already paused
+         elapsed = now.Sub(RecordedAt).Seconds()
+         LastRecordedPosition += elapsed  ← advance lazily
+         RecordedAt = now, IsPlaying = false
+         broadcastPosition = LastRecordedPosition
+
+seek  →  validate: 0 ≤ position < MaxPlaybackPositionSeconds
+         LastRecordedPosition = position
+         RecordedAt = now
+         IsPlaying unchanged
+         broadcastPosition = position
+```
+
+All broadcasts go to every client in the room **including the sender** — the sender's video must not respond until the server echo arrives (no local optimism).
+
+### Late Joiner — sync_state
+
+When a client registers and a `RoomPlaybackState` exists for the room, the Hub sends a `sync_state` message before the `user_joined` broadcast:
+
+```go
+position := state.LastRecordedPosition
+if state.IsPlaying {
+    position += time.Since(state.RecordedAt).Seconds()
+}
+// Send computed position — do NOT persist. Original RecordedAt stays unchanged
+// so all future elapsed calculations remain correct regardless of how many
+// clients join.
+client.send <- makeEnvelope("sync_state", SyncCommandPayload{
+    Action:    "seek",
+    Position:  position,
+    IsPlaying: state.IsPlaying,
+})
+```
+
+The `time.Since(state.RecordedAt)` call uses the monotonic component stored in `state.RecordedAt` — correct and NTP-immune.
+
+### Action Validation
+
+Zero-allocation switch instead of a map literal allocated per call:
+
+```go
+switch p.Action {
+case "play", "pause", "seek":
+    // valid
+default:
+    return
+}
+```
+
+### Broadcast Payload
+
+`SyncCommandPayload` struct replaces `map[string]interface{}` for all sync messages. One typed struct, compile-time safe, no per-broadcast map allocation on the hot path.
 
 ---
 
 ## Message Envelope
 
-Every WebSocket message in both directions follows this exact shape for the lifetime of the project:
+Every WebSocket message in both directions:
 
 ```json
 {
@@ -541,71 +546,59 @@ Every WebSocket message in both directions follows this exact shape for the life
 }
 ```
 
-`type` routes the message. `payload` carries the data. Unknown types are dropped silently — never processed, never forwarded. This envelope is the contract between client and server across all future steps.
+`type` routes the message. `payload` carries the data. Unknown types are dropped silently — never processed, never forwarded. This envelope is the contract between client and server for the lifetime of the project.
 
-### Step 1 Message Types
+### Message Types
 
 ```
 Client → Server:
-    join                { name, sessionToken? }
+    join            { name, sessionToken? }
+    relay           { ...any... }            ← fanned out to room, sender excluded
+    sync_command    { action, position? }    ← play | pause | seek
 
 Server → Client:
-    session_token       { sessionToken }             ← sent on raw conn BEFORE Hub registration
-    session_init        { userId }                   ← sent via Hub after registration
-    room_state          { members: [{ userId, name }] }   ← sent immediately on join (excludes self)
+    session_token       { sessionToken }             ← raw conn, BEFORE Hub registration
+    session_init        { userId }
+    room_state          { members: [{ userId, name }] }
     user_joined         { userId, name }
     user_left           { userId, name }
     user_reconnected    { userId, name }
     host_changed        { userId, name }
+    sync_command        { action, position, isPlaying }  ← authoritative broadcast, all clients
+    sync_state          { action, position, isPlaying }  ← late joiner only, on register
     error               { code, message }
 ```
-
-`session_token` is written directly to the WebSocket connection before the client is registered with the Hub. This ensures the client has its reconnect token before any room events (`user_joined`, `room_state`) arrive.
-
-`room_state` is sent to the joining user immediately after registration. The member list excludes the joining user themselves — they know who they are from `session_init`. Without it, Alice joins and has no idea Bob is already there until Bob does something.
 
 ---
 
 ## HTTP Layer
 
-### Two Endpoints Only
+### Two Endpoints
 
 ```
 POST /rooms          Generate code, write to Redis, return code
-GET  /rooms/:code    Validate room exists, return member count and full status
+GET  /rooms/:code    Validate room exists, return memberCount and full status
 ```
 
-Room creation is a one-shot request/response — HTTP is exactly the right protocol. WebSocket is for persistent sessions. Opening a WebSocket just to create a room would be wasteful by design.
-
-### Middleware Stack — Every Request
-
-```go
-wrap := func(handler http.Handler, limiter *rateLimiter) http.Handler {
-    return securityHeaders(cors(cfg.AllowedOrigin)(limiter.middleware(handler)))
-}
-```
-
-Execution order for each incoming request:
+### Middleware Stack
 
 ```
 Incoming Request
         │
         ▼
-Security Headers          CSP, X-Frame-Options, nosniff, Referrer-Policy
+Security Headers      CSP, X-Frame-Options, nosniff, Referrer-Policy
         │
         ▼
-CORS Validation           Only https://syncoplex.app — never wildcard
+CORS Validation       Only https://syncoplex.app — never wildcard
         │
         ▼
-Rate Limiter              IP-based token bucket (per-route limits)
+Rate Limiter          IP-based token bucket (per-route limits)
         │
         ▼
-Handler                   Business logic
+Handler               Business logic
 ```
 
-Security headers and CORS are outermost — they run first and are applied even to rejected requests.
-
-WebSocket connections (`/ws/:code`) go through security headers and CORS but do not have a per-connection HTTP rate limiter. The WebSocket rate-limit constant `RateWSMessages` is defined in config but enforcement at the message level is a Step 1 TODO — the current `readPump` processes all messages from a connection without per-message rate gating.
+Security headers and CORS are outermost — applied even to rejected requests.
 
 ---
 
@@ -614,97 +607,69 @@ WebSocket connections (`/ws/:code`) go through security headers and CORS but do 
 ### Transport
 
 ```
-All traffic        →  TLS (HTTPS + WSS)
-Caddy Caddyfile    →  syncoplex.app { reverse_proxy localhost:8080 }
-                      That one line provisions and auto-renews Let's Encrypt
-Go server          →  Speaks plain HTTP internally, never exposed directly
+All traffic  →  TLS (HTTPS + WSS)
+Caddy        →  syncoplex.app { reverse_proxy localhost:8080 }
+Go server    →  plain HTTP internally, never exposed directly
 ```
 
 ### WebSocket Origin Validation
 
 ```go
-func newUpgrader(allowedOrigin string) websocket.Upgrader {
-    return websocket.Upgrader{
-        ReadBufferSize:  1024,
-        WriteBufferSize: 1024,
-        CheckOrigin: func(r *http.Request) bool {
-            return r.Header.Get("Origin") == allowedOrigin
-        },
-    }
+CheckOrigin: func(r *http.Request) bool {
+    return r.Header.Get("Origin") == allowedOrigin
 }
 ```
 
-Any connection not originating from your frontend is rejected at the upgrade handshake before any application code runs.
+Any connection not originating from the frontend is rejected at the upgrade handshake.
 
 ### Per-Connection Constraints
 
-Applied immediately on every WebSocket connection:
-
 ```go
-conn.SetReadLimit(MaxMessageSize)                               // 4KB max message size
-conn.SetReadDeadline(time.Now().Add(PongWait * time.Second))   // drop silent connections
-conn.SetPongHandler(func(string) error {                        // reset deadline on heartbeat
+conn.SetReadLimit(MaxMessageSize)                              // 4KB max message size
+conn.SetReadDeadline(time.Now().Add(PongWait * time.Second))  // drop silent connections
+conn.SetPongHandler(func(string) error {                       // reset deadline on heartbeat
     conn.SetReadDeadline(time.Now().Add(PongWait * time.Second))
     return nil
 })
 ```
 
-A client sending a 1GB message is dropped before a single byte is processed. A client that goes silent is cleaned up automatically.
-
 ### Rate Limits
 
 ```
-POST /rooms                  20 requests / IP / minute
-GET  /rooms/:code            10 requests / IP / minute    ← brute force protection
-WebSocket messages           30 messages / connection / second  (constant defined, enforcement is Step 1 TODO)
+POST /rooms              20 requests / IP / minute
+GET  /rooms/:code        10 requests / IP / minute
+sync_command             5 commands / client / second  ← enforced in handleSyncCommand
 ```
-
-The rate limiter uses a token bucket per IP address with a background cleanup goroutine that evicts stale entries every 5 minutes.
 
 ### HTTP Security Headers
 
 ```
-Content-Security-Policy      default-src 'self';
-                             connect-src 'self' wss://syncoplex.app;
-                             media-src blob:;
-                             script-src 'self';
-                             style-src 'self'
-X-Frame-Options              DENY
-X-Content-Type-Options       nosniff
-Referrer-Policy              strict-origin-when-cross-origin
-Permissions-Policy           camera=*, microphone=*
+Content-Security-Policy   default-src 'self';
+                          connect-src 'self' wss://syncoplex.app;
+                          media-src blob:;
+                          script-src 'self';
+                          style-src 'self'
+X-Frame-Options           DENY
+X-Content-Type-Options    nosniff
+Referrer-Policy           strict-origin-when-cross-origin
+Permissions-Policy        camera=*, microphone=*
 ```
-
-CSP blocks XSS attacks even if an injection point is found — the browser refuses to execute anything not from `'self'`.
 
 ### Input Validation
 
 ```
-Room code        Must match ^[A-Z]+-[A-Z]+-[0-9]+$  before any Redis call
-Display name     Strip all HTML tags, trim whitespace, cap at 32 Unicode characters
-Message type     Validated against known type allowlist — unknown types dropped
-Message size     Hard capped at 4KB by SetReadLimit
+Room code        ^[A-Z]+-[A-Z]+-[0-9]+$  before any Redis call
+Display name     strip HTML tags, trim whitespace, cap 32 Unicode chars
+sync position    0 ≤ position < MaxPlaybackPositionSeconds (86400)
+Message type     unknown types dropped silently
+Message size     hard cap 4KB via SetReadLimit
 ```
-
-Room code validation before any Redis call prevents injection-style attacks using crafted key strings.
-
-### CORS
-
-```
-Access-Control-Allow-Origin   https://syncoplex.app    ← never wildcard
-Access-Control-Allow-Methods  GET, POST
-Access-Control-Allow-Headers  Content-Type
-```
-
-Preflight OPTIONS requests from any other origin receive a 403.
 
 ### Dependency Auditing
 
 ```bash
 govulncheck ./...    ← run before every deploy
 ```
-
-With three dependencies the attack surface remains minimal. govulncheck scans all of them against the Go vulnerability database.
 
 ---
 
@@ -714,86 +679,67 @@ With three dependencies the attack surface remains minimal. govulncheck scans al
 1. Host opens app
    POST /rooms
    ← { code: "WOLF-BEAR-482134" }
-   Redis: room:WOLF-BEAR-482134 written with hostId: "pending"
+   Redis: room:WOLF-BEAR-482134 { hostId: "pending", ... }
    Browser navigates to /room/WOLF-BEAR-482134
 
 2. Host enters name, clicks Join
-   WebSocket opens → wss://syncoplex.app/ws/WOLF-BEAR-482134
-   Origin header validated ← rejected here if not your frontend
-   Room existence checked in Redis ← 404 if not found
-   Member count checked via Hub ← 403 if room full (never happens for host)
+   WebSocket → wss://syncoplex.app/ws/WOLF-BEAR-482134
+   Origin validated ← rejected if not frontend
+   Room existence checked in Redis ← 404 if missing
+   Member count checked via Hub ← 403 if full
    Sends: { type: "join", payload: { name: "Host" } }
 
    Server:
    Generates userId + sessionToken
-   Token held in memory on Client struct — NOT written to Redis yet
-   conn.WriteMessage → { type: "session_token", payload: { sessionToken } }  ← before Hub registration
-   hub.register <- client
-   Hub goroutine: hostId updated from "pending" to real userId
-   Hub goroutine: client.send ← { type: "session_init", payload: { userId } }
-   Hub goroutine: client.send ← { type: "room_state", payload: { members: [] } }  ← empty, host is first
+   Token held in memory — NOT written to Redis
+   conn.WriteMessage → { type: "session_token", ... }  ← before Hub registration
+   hub.events <- RegisterEvent
+   Hub: hostId set from "pending" to real userId
+   Hub: client.send ← session_init { userId }
+   Hub: client.send ← room_state   { members: [] }
 
-3. Friend receives room code, opens app
+3. Friend receives code, opens app
    GET /rooms/WOLF-BEAR-482134
    ← { exists: true, memberCount: 1, full: false }
-   Friend sees name entry form
 
 4. Friend enters name, clicks Join
-   Member count checked via Hub ← 403 if full
-   WebSocket opens, origin validated
-   Room existence checked in Redis
-   Sends: { type: "join", payload: { name: "Alice" } }
+   WebSocket → same flow as step 2
+   Hub: client.send ← room_state { members: [{ host }] }
+   Hub: broadcastToOthers → user_joined { userId, name: "Alice" }
 
-   Server:
-   Generates userId + sessionToken
-   Token held in memory — NOT written to Redis yet
-   conn.WriteMessage → { type: "session_token", payload: { sessionToken } }  ← before Hub registration
-   hub.register <- client
-   Hub goroutine: client.send ← { type: "session_init", payload: { userId } }
-   Hub goroutine: client.send ← { type: "room_state", payload: { members: [{ host }] } }
-   Hub goroutine: broadcastToOthers → { type: "user_joined", payload: { userId, name: "Alice" } }
-
-5. Alice's network blips — tab briefly disconnects
-   readPump exits → hub.unregister <- alice
-   Hub: stale pointer guard passes — this is still the active client
-   Hub: dropClient(alice)
-     → writeSessionOnDisconnect: session:{token} written to Redis with 5 min TTL ← reconnect clock starts now
-     → delete alice from room (under mutex)
+5. Alice's network blips
+   readPump exits → hub.events <- UnregisterEvent
+   Hub: stale pointer guard passes
+   Hub: dropClient
+     → writeSessionOnDisconnect: session:{token} → Redis, 5 min TTL
+     → delete alice from room (under h.mu.Lock)
+     → delete playbackStates entry if room empties
      → close alice.send
      → resetRoomTTL
-     → broadcastToRoom: { type: "user_left", payload: { userId: alice-uuid } }
-     → no host migration needed (alice is not host)
+     → broadcastToRoom: user_left { userId }
+     → no host migration (alice is not host)
 
-   Alice's browser reconnects automatically (client-side retry)
+   Alice reconnects automatically
    Sends: { type: "join", payload: { name: "Alice", sessionToken: "abc..." } }
-
-   Server finds session in Redis — token valid:
-   Token deleted immediately (one-time use)
-   Fresh token issued, held in memory on new Client struct
-   Restores alice-uuid as userId, isReconnect = true
-   conn.WriteMessage → { type: "session_token", payload: { newSessionToken } }
-   hub.register <- newAliceClient
-   Hub: isReconnect=true, cap check bypassed
-   Hub: client.send ← { type: "session_init", payload: { userId: alice-uuid } }
-   Hub: client.send ← { type: "room_state", payload: { members: [{ host }] } }
-   Hub: broadcastToOthers → { type: "user_reconnected", payload: { userId: alice-uuid } }
-   ← NOT user_joined — clients know not to reset peer state
+   Token found in Redis → deleted, fresh token issued, isReconnect = true
+   hub.events <- RegisterEvent
+   Hub: cap check bypassed (isReconnect)
+   Hub: client.send ← session_init, room_state
+   Hub: if playbackState exists → client.send ← sync_state (computed position)
+   Hub: broadcastToOthers → user_reconnected (NOT user_joined)
 
 6. Host closes tab
-   Hub: dropClient(host)
-     → writeSessionOnDisconnect: session:{token} written to Redis
-     → delete host from room (under mutex)
-     → close host.send
-     → resetRoomTTL
-     → broadcastToRoom: { type: "user_left", payload: { userId: host-uuid } }
-     → host migration: next member becomes host
-     → Redis: hostId updated
-     → broadcastToRoom: { type: "host_changed", payload: { userId: alice-uuid } }
+   Hub: dropClient
+     → writeSessionOnDisconnect
+     → delete host from room
+     → broadcastToRoom: user_left
+     → host migration: next member → hostIds, Redis HSet, broadcastToRoom host_changed
 
 7. Last person leaves
    Hub: dropClient → room empties
-   Hub: delete h.rooms[roomCode], delete h.hostIds[roomCode] (under mutex)
-   Redis: room:{code} TTL collapsed to 5 minutes
+   Hub: delete h.rooms[roomCode] (under h.mu.Lock)
+   Hub: delete h.hostIds[roomCode], h.playbackStates[roomCode] (after unlock)
+   Redis: room TTL collapsed to 5 minutes
 ```
 
 ---
@@ -804,13 +750,12 @@ With three dependencies the attack surface remains minimal. govulncheck scans al
 
 ```
 WebSocket message received
-    → readPump goroutine receives bytes         ~microseconds
-    → puts Message on Hub broadcast channel     ~microseconds
-    → Hub goroutine picks up, iterates room     ~microseconds
-    → drops into each client's send channel     ~microseconds
-    → writePump goroutine writes to WebSocket   ~microseconds
-    ─────────────────────────────────────────────────────────
-    Total server processing                     < 1ms
+    → readPump receives bytes              ~microseconds
+    → sends HubEvent to h.events          ~microseconds  (non-blocking)
+    → Hub goroutine executes event        ~microseconds  (map lookup + chan sends)
+    → writePump writes to WebSocket       ~microseconds
+    ──────────────────────────────────────────────────
+    Total server processing               < 1ms
 
 Network latency between users dominates entirely.
 The server is never the bottleneck.
@@ -821,25 +766,22 @@ The server is never the bottleneck.
 ```
 Go runtime baseline                     ~4MB
 Hub rooms map (100 rooms, 4 users)      ~1MB
-802 goroutines × 4KB                    ~3.2MB
-Send channel buffers (typical)          ~5MB
+802 goroutines × 4KB stack              ~3.2MB
+Send channel buffers                    ~5MB
 Redis client                            ~2MB
-─────────────────────────────────────────────
+────────────────────────────────────────────
 Total                                   ~15MB
 ```
-
-A $5/mo VPS with 512MB RAM could run thousands of concurrent rooms.
 
 ### Redis Call Frequency
 
 ```
-Per join event          2 Redis calls    (room exists check, TTL reset)
-Per leave/disconnect    2 Redis calls    (session write, TTL reset)
-Per relay message       0 Redis calls    ← server never touches Redis for relay
-Every 30 minutes        N Redis calls    (N = number of active rooms, heartbeat only)
+Per join              2 calls  (room exists check, TTL reset)
+Per leave             2 calls  (session write, TTL reset)
+Per relay message     0 calls
+Per sync_command      0 calls
+Every 30 minutes      N calls  (N = active rooms, heartbeat)
 ```
-
-The server is almost entirely in-memory during active sessions. Redis is consulted at the edges — join, leave, reconnect — never in the hot path. Session tokens no longer add a Redis write on connect, only on disconnect.
 
 ---
 
@@ -851,30 +793,31 @@ The server is almost entirely in-memory during active sessions. Redis is consult
 | Store user data | No database, no privacy surface |
 | Authenticate users | Room code is the auth — friction is the enemy |
 | Know what movie is playing | Completely irrelevant to the server |
-| Manage playback logic | Clients do that — server relays with timestamps in Step 3 |
 | Track live membership in Redis | Hub is source of truth — Redis divergence eliminated |
-| Reset TTL on relay messages | Would create thousands of unnecessary Redis round trips |
-| Write to WebSocket connections directly from Hub | Write loops handle that — Hub never blocks |
-| Use a web framework | net/http stdlib is sufficient — no framework overhead |
+| Reset TTL on relay messages | Thousands of unnecessary Redis round trips |
+| Write to WebSocket directly from Hub | writePump handles that — Hub never blocks |
+| Use a web framework | net/http stdlib is sufficient |
 | Expose Redis to the network | localhost only, always |
-| Write session token to Redis on connect | Token only matters after disconnect — writing it on connect wastes a Redis call and starts the TTL clock at the wrong time |
-| Use a channel-based count query for room members | A read lock on the Hub's mutex is simpler and sufficient for this single cross-goroutine read |
+| Write session token to Redis on connect | Only matters after disconnect — writing earlier wastes a call and starts the TTL clock at the wrong time |
+| Use a channel per event type | One typed event channel is cleaner and prevents coupling between message flows |
+| Use map[string]interface{} for sync payloads | Typed SyncCommandPayload struct — zero allocation, compile-time safe |
+| Use int64 unix ms for RecordedAt | time.Time preserves the monotonic clock — NTP-immune elapsed calculation |
 
-Each omission is a feature. Everything the server does not do is something that cannot go wrong, cannot cost money, and cannot slow the user down.
+Each omission is a feature. Everything the server does not do is something that cannot go wrong.
 
 ---
 
-## Build Order Within Step 1
+## Build Order
 
 ```
-1. config.go        Environment variables, constants, room cap definition
+1. config.go        Environment variables, constants (MaxRoomMembers, MaxPlaybackPositionSeconds, ...)
 2. redis.go         Redis client singleton, connection with auth, pool sizing
 3. middleware.go    Rate limiter, security headers, CORS, input validation
 4. session.go       Token generation, Redis store/retrieve, reconnect identity
 5. rooms.go         Code generation, POST /rooms, GET /rooms/:code
-6. hub.go           Hub struct, Run loop, register/unregister/broadcast, host migration,
-                    WebSocket handler, read pump, write pump
+6. hub.go           Hub struct, event types, run loop, all handlers,
+                    WebSocket handler, readPump, writePump
 7. main.go          Wire all of the above, start server
 ```
 
-This order matters — each file depends only on what came before it.
+Each file depends only on what came before it.
