@@ -32,6 +32,12 @@ const membersList       = $('members-list')
 const btnLeaveLobby     = $('btn-leave-lobby')
 const btnPickFile       = $('btn-pick-file')
 
+// Fingerprint verdict UI
+const fingerprintSpinner  = $('fingerprint-spinner')   // visible while pending + file chosen
+const fingerprintValid    = $('fingerprint-valid')      // ✓ shown on valid
+const fingerprintMismatch = $('fingerprint-mismatch')   // ✗ block shown on mismatch
+const fingerprintError    = $('fingerprint-error')      // shown on timeout / Worker crash
+const btnJoinWatch        = $('btn-join-watch')         // the Join button — gated on verdict
 
 // Reconnect pill (injected into body)
 const reconnectPill = (() => {
@@ -166,6 +172,19 @@ btnLeaveLobby.addEventListener('click', () => {
 // "Pick File & Watch" — only visible when connected, calls player directly
 btnPickFile.addEventListener('click', () => player.openPicker())
 
+// "Join" — re-pick trigger on mismatch; also the primary join path.
+// Clicking while in mismatch state opens the file picker so the user
+// can select a different file. The button is disabled unless verdict is valid.
+btnJoinWatch.addEventListener('click', () => {
+  if (roomState.fileVerdict === FILE_VERDICTS.MISMATCH) {
+    player.openPicker()
+    return
+  }
+  // Verdict is valid — transition to watch view.
+  showView('watch')
+  render()
+})
+
 // ── Member List Renderer ─────────────────────────────────────────
 
 const renderMembers = () => {
@@ -215,6 +234,53 @@ const renderWsStatus = () => {
     wsStatusLabel.textContent = 'Disconnected'
     btnPickFile.hidden = true
   }
+}
+
+// ── Fingerprint Verdict Renderer ─────────────────────────────────
+//
+// Drives the file section of the lobby based on fileVerdict and
+// fileVerdictError. Called on every render() while in lobby view.
+//
+// States:
+//   pending, no file chosen  → all indicators hidden
+//   pending, file chosen     → spinner visible
+//   pending, error           → error message visible, re-pick prompt
+//   valid                    → ✓ indicator visible, Join enabled
+//   mismatch                 → ✗ block visible, Join opens file picker
+
+const renderFingerprintVerdict = () => {
+  const verdict = roomState.fileVerdict
+  const error   = roomState.fileVerdictError
+  const hasFile = roomState.fileHash !== null
+
+  // Hide everything first, then show only what's needed.
+  fingerprintSpinner.hidden  = true
+  fingerprintValid.hidden    = true
+  fingerprintMismatch.hidden = true
+  fingerprintError.hidden    = true
+
+  if (verdict === FILE_VERDICTS.VALID) {
+    fingerprintValid.hidden = false
+
+  } else if (verdict === FILE_VERDICTS.MISMATCH) {
+    fingerprintMismatch.hidden = false
+
+  } else {
+    // PENDING
+    if (error) {
+      fingerprintError.textContent = error
+      fingerprintError.hidden = false
+    } else if (hasFile) {
+      // Hash computed or in-flight — show spinner
+      fingerprintSpinner.hidden = false
+    }
+    // No file chosen yet — all hidden, nothing to show
+  }
+
+  // Gate the Join button: connected AND verdict is valid.
+  const canJoin = roomState.wsStatus === 'connected'
+               && verdict === FILE_VERDICTS.VALID
+  btnJoinWatch.disabled = !canJoin
 }
 
 // ── Watch View Renderer ──────────────────────────────────────────
@@ -296,6 +362,7 @@ document.addEventListener('player:ready', () => {
   showView('watch')
   render()  // force renderWatch() now that the view has switched
 })
+
 // ── Main Render ──────────────────────────────────────────────────
 
 const render = () => {
@@ -303,6 +370,7 @@ const render = () => {
   if (view === 'lobby') {
     renderWsStatus()
     renderMembers()
+    renderFingerprintVerdict()
   }
   if (view === 'watch') {
     renderWatch()
