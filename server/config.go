@@ -8,16 +8,17 @@ import (
 
 const (
 	MaxRoomMembers  = 6
-	RoomTTL         = 6 * 60 * 60 // 6 hours in seconds
-	SessionTTL      = 5 * 60      // 5 minutes in seconds
-	MaxMessageSize  = 4096         // 4KB
-	WriteWait       = 10           // seconds — write deadline per message
-	PongWait        = 60           // seconds — max silence before drop
-	SendBufferSize  = 256          // buffered send channel size per client
+	RoomTTL         = 6 * 60 * 60 		// 6 hours in seconds
+	SessionTTL      = 5 * 60      		// 5 minutes in seconds
+	MaxMessageSize  = 4096         		// 4KB
+	WriteWait       = 10           		// seconds — write deadline per message
+	PongWait        = 60           		// seconds — max silence before drop
+	SendBufferSize  = 256          		// buffered send channel size per client
 	MaxNameLength   = 32
-	RateRoomCreate  = 20  // requests per minute per IP
-	RateRoomLookup  = 10  // requests per minute per IP
-	RateWSMessages  = 30  // messages per second per connection
+	RateRoomCreate  = 20  				// requests per minute per IP
+	RateRoomLookup  = 10  				// requests per minute per IP
+	RateWSMessages  = 30  				// messages per second per connection
+	MaxPlaybackPositionSeconds = 86400	// max seconds in a movie
 )
 
 type Config struct {
