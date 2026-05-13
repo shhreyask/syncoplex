@@ -477,7 +477,7 @@ func (h *Hub) dropClient(room map[string]*Client, client *Client) {
 		delete(h.playbackStates, client.roomCode)
 	}
 
-		close(client.send)
+	close(client.send)
 
 	// Broadcast user_left before host migration so clients process in order
 	h.broadcastToRoom(client.roomCode, makeEnvelope("user_left", map[string]string{

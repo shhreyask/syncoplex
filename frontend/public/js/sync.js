@@ -133,3 +133,11 @@ function startDriftWorker() {
     setTimeout(startDriftWorker, delay)
   }
 }
+
+startDriftWorker()
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') {
+    driftWorker?.postMessage({ type: 'check' })
+  }
+})
