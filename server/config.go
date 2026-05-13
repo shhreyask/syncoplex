@@ -17,7 +17,6 @@ const (
 	MaxNameLength   = 32
 	RateRoomCreate  = 20  				// requests per minute per IP
 	RateRoomLookup  = 10  				// requests per minute per IP
-	RateWSMessages  = 30  				// messages per second per connection
 	MaxPlaybackPositionSeconds = 86400	// max seconds in a movie
 )
 

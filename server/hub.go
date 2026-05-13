@@ -296,7 +296,7 @@ func (h *Hub) handleRelay(e *RelayEvent) {
 //
 // Both helpers run only on the hub goroutine. h.rooms is safe to read without
 // a lock — the only concurrent accessor is roomMemberCount (HTTP goroutine),
-// which only reads, and Go maps are safe for concurrent reads.
+// which only reads.
 // h.mu is acquired only when writing h.rooms (handleRegister, dropClient).
 
 func (h *Hub) broadcastToRoom(roomCode string, data []byte) {
@@ -477,18 +477,15 @@ func (h *Hub) dropClient(room map[string]*Client, client *Client) {
 		delete(h.playbackStates, client.roomCode)
 	}
 
-	close(client.send)
+		close(client.send)
 
-	resetRoomTTL(ctx, h.rdb, client.roomCode)
-
-	// Broadcast user_left before host migration — clients must always process
-	// membership loss before any role change arrives.
+	// Broadcast user_left before host migration so clients process in order
 	h.broadcastToRoom(client.roomCode, makeEnvelope("user_left", map[string]string{
 		"userId": client.userId,
 		"name":   client.name,
 	}))
 
-	// Host migration — hostIds is hub-goroutine-only, no mutex needed.
+	// Host migration
 	if client.userId == h.hostIds[client.roomCode] && len(room) > 0 {
 		for _, next := range room {
 			h.hostIds[client.roomCode] = next.userId
@@ -501,9 +498,13 @@ func (h *Hub) dropClient(room map[string]*Client, client *Client) {
 		}
 	}
 
-	// Room is empty — collapse Redis TTL to 5 minutes.
-	if remaining == 0 {
-		h.rdb.Expire(ctx, "room:"+client.roomCode, 5*time.Minute)
+	// TTL: reset to full duration while members remain; shrink to grace period when empty
+	if remaining > 0 {
+		resetRoomTTL(ctx, h.rdb, client.roomCode)
+	} else {
+		if err := h.rdb.Expire(ctx, "room:"+client.roomCode, 5*time.Minute).Err(); err != nil {
+			log.Printf("hub: failed to set empty-room TTL for %s — %v", client.roomCode, err)
+		}
 	}
 }
 
