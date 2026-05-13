@@ -587,12 +587,7 @@ func handleWebSocket(hub *Hub, rdb *redis.Client, upgrader websocket.Upgrader) h
 
 		var env Envelope
 		if err := json.Unmarshal(raw, &env); err != nil || env.Type != "join" {
-			conn.WriteMessage(websocket.TextMessage,
-				makeEnvelope("error", map[string]string{
-					"code":    "BAD_HANDSHAKE",
-					"message": "First message must be type join",
-				}))
-			conn.Close()
+			writeErrorAndClose(conn, "BAD_HANDSHAKE", "First message must be type join")
 			return
 		}
 
@@ -607,12 +602,7 @@ func handleWebSocket(hub *Hub, rdb *redis.Client, upgrader websocket.Upgrader) h
 
 		name := sanitizeName(joinPayload.Name)
 		if name == "" {
-			conn.WriteMessage(websocket.TextMessage,
-				makeEnvelope("error", map[string]string{
-					"code":    "BAD_NAME",
-					"message": "Display name is required",
-				}))
-			conn.Close()
+			writeErrorAndClose(conn, "BAD_NAME", "Display name is required")
 			return
 		}
 
@@ -639,12 +629,7 @@ func handleWebSocket(hub *Hub, rdb *redis.Client, upgrader websocket.Upgrader) h
 			uid, token, err := newSession()
 			if err != nil {
 				log.Printf("hub: session create error — %v", err)
-				conn.WriteMessage(websocket.TextMessage,
-					makeEnvelope("error", map[string]string{
-						"code":    "INTERNAL",
-						"message": "Failed to create session",
-					}))
-				conn.Close()
+				writeErrorAndClose(conn, "INTERNAL", "Failed to create session")
 				return
 			}
 			userID = uid
@@ -665,10 +650,12 @@ func handleWebSocket(hub *Hub, rdb *redis.Client, upgrader websocket.Upgrader) h
 		// Send session token directly on the raw connection BEFORE registering
 		// with the Hub — the client must store it before any room events arrive
 		// (user_joined, room_state) so it can reconnect if it immediately drops.
+		conn.SetWriteDeadline(time.Now().Add(WriteWait * time.Second))
 		conn.WriteMessage(websocket.TextMessage,
 			makeEnvelope("session_token", map[string]string{
 				"sessionToken": sessionToken,
 			}))
+		conn.SetWriteDeadline(time.Time{}) // clear it; writePump manages its own
 
 		hub.events <- &RegisterEvent{client: client}
 
@@ -678,7 +665,6 @@ func handleWebSocket(hub *Hub, rdb *redis.Client, upgrader websocket.Upgrader) h
 		client.readPump()
 	}
 }
-
 // ── Read Pump ─────────────────────────────────────────────────────────────────
 
 func (c *Client) readPump() {
@@ -729,9 +715,13 @@ func (c *Client) writePump() {
 		c.conn.SetWriteDeadline(time.Now().Add(WriteWait * time.Second))
 		if err := c.conn.WriteMessage(websocket.TextMessage, msg); err != nil {
 			// Write failed — connection is dead. Loop exits, defer closes conn.
-			break
+			return
 		}
 	}
+
+	c.conn.SetWriteDeadline(time.Now().Add(WriteWait * time.Second))
+	c.conn.WriteMessage(websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
 }
 
 // ── Utility ───────────────────────────────────────────────────────────────────
@@ -747,4 +737,14 @@ func stringToUpper(s string) string {
 		}
 	}
 	return string(result)
+}
+
+func writeErrorAndClose(conn *websocket.Conn, code, message string) {
+	conn.SetWriteDeadline(time.Now().Add(WriteWait * time.Second))
+	conn.WriteMessage(websocket.TextMessage,
+		makeEnvelope("error", map[string]string{
+			"code":    code,
+			"message": message,
+		}))
+	conn.Close()
 }
