@@ -8,6 +8,15 @@ const FILE_STATES = {
   PAUSED:   'paused',
 }
 
+// ── File Verdicts ─────────────────────────────────────────────────
+// Tracks the server's verdict on the fingerprint hash.
+// Independent of FILE_STATES — a file can be READY but MISMATCH.
+const FILE_VERDICTS = {
+  PENDING:  'pending',   // hash computing, in-flight to server, or awaiting re-pick
+  VALID:    'valid',     // server confirmed match
+  MISMATCH: 'mismatch',  // server rejected — wrong file
+}
+
 // ── Single Source of Truth ───────────────────────────────────────
 const roomState = {
   // Identity
@@ -27,11 +36,15 @@ const roomState = {
   },
 
   // File
-  file:      null,
-  blobUrl:   null,
-  fileReady: false,
-  fileHash:  null,
-  fileState: FILE_STATES.WAITING,
+  file:             null,
+  blobUrl:          null,
+  fileReady:        false,
+  fileHash:         null,   // hex string — stored for reconnect re-send
+  fileState:        FILE_STATES.WAITING,
+
+  // Fingerprint verdict
+  fileVerdict:      FILE_VERDICTS.PENDING,  // 'pending' | 'valid' | 'mismatch'
+  fileVerdictError: null,                   // string | null — shown on timeout or Worker crash
 
   // Connection
   wsStatus: 'disconnected', // 'disconnected' | 'connecting' | 'connected'
@@ -49,18 +62,20 @@ const notifyUpdate = () => {
 
 //Single reset call
 const resetRoomState = () => {
-    roomState.roomCode     = null
-    roomState.myUserId     = null
-    roomState.myName       = null
-    roomState.sessionToken = null
-    roomState.members      = []
-    roomState.playback     = { playing: false, position: 0, serverTime: null }
-    roomState.file         = null
-    if (roomState.blobUrl) URL.revokeObjectURL(roomState.blobUrl) 
-    roomState.blobUrl      = null
-    roomState.fileReady    = false
-    roomState.fileHash     = null
-    roomState.fileState    = FILE_STATES.WAITING
+    roomState.roomCode        = null
+    roomState.myUserId        = null
+    roomState.myName          = null
+    roomState.sessionToken    = null
+    roomState.members         = []
+    roomState.playback        = { playing: false, position: 0, serverTime: null }
+    roomState.file            = null
+    if (roomState.blobUrl) URL.revokeObjectURL(roomState.blobUrl)
+    roomState.blobUrl         = null
+    roomState.fileReady       = false
+    roomState.fileHash        = null
+    roomState.fileState       = FILE_STATES.WAITING
+    roomState.fileVerdict     = FILE_VERDICTS.PENDING
+    roomState.fileVerdictError = null
     // one notifyUpdate() at the end, not one per field
     notifyUpdate()
 }

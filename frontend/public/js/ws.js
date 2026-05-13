@@ -94,6 +94,14 @@ const connect = (roomCode, name) => {
     reconnectAttempt = 0
     setWsStatus('connected')
     sendJoin(name)
+
+    // Re-send a pending fingerprint hash on connect/reconnect.
+    // Covers two cases:
+    //   1. File was picked before the WebSocket handshake completed.
+    //   2. User is reconnecting — new Client on server has fingerprintValid = false.
+    if (roomState.fileHash && roomState.fileVerdict === FILE_VERDICTS.PENDING) {
+      wsSend('file_fingerprint', { fingerprint: roomState.fileHash })
+    }
   }
 
   ws.onmessage = (event) => {
@@ -112,8 +120,14 @@ const connect = (roomCode, name) => {
   ws.onclose = () => {
     ws = null
     setWsStatus('disconnected')
+
+    // Reset verdict to PENDING so the onopen re-send logic fires on reconnect.
+    // fileHash is intentionally preserved — it is the re-send mechanism.
+    roomState.fileVerdict = FILE_VERDICTS.PENDING
+    notifyUpdate()
+
     if (!manualClose) scheduleReconnect(roomCode, name)
-}
+  }
 
   ws.onerror = () => {
     // onerror always fires before onclose — let onclose drive reconnect logic
