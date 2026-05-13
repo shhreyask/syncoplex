@@ -96,19 +96,18 @@ let workerRetries = 0
 const MAX_WORKER_RETRIES = 5
 
 function startDriftWorker() {
-  if (workerRetries >= MAX_WORKER_RETRIES) return
+  if (workerRetries >= MAX_WORKER_RETRIES) {
+    driftWorker = null  // explicit null — visibilitychange ?. becomes a true no-op
+    return
+  }
 
   driftWorker = new Worker('/js/worker.js')
 
   driftWorker.onmessage = () => {
     workerRetries = 0
 
-    // No baseline yet — skip until first applySync fires. Without this guard,
-    // elapsed is enormous on first load and expected overflows → user lands at end.
     if (lastApply.localTime === 0) return
 
-    // During seek rebuffer, video.paused === true while roomState.playback.playing
-    // may still be true. Use video.paused to avoid spurious correction.
     if (video.paused) return
     if (!roomState.playback.playing) return
 
@@ -117,7 +116,6 @@ function startDriftWorker() {
     const drift    = Math.abs(expected - video.currentTime)
 
     if (drift > 2) {
-      // Reset rate before hard seek — a previous tick may have left it at 1.05.
       video.playbackRate = 1.0
       player.seekTo(expected)
     } else if (drift > 0.5) {
@@ -128,17 +126,10 @@ function startDriftWorker() {
   }
 
   driftWorker.onerror = () => {
+    driftWorker.terminate()  // release the failed worker before scheduling retry
+    driftWorker = null
     workerRetries++
     const delay = Math.min(1000 * 2 ** workerRetries, 30_000)
     setTimeout(startDriftWorker, delay)
   }
 }
-
-startDriftWorker()
-
-// Trigger an immediate drift check when a backgrounded tab returns.
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') {
-    driftWorker?.postMessage({ type: 'check' })
-  }
-})
