@@ -2,14 +2,14 @@
 
 ## What This Step Is
 
-`sync.js` — one new file, ~100 lines. It plugs into the existing architecture with minimal surface changes: one line in `player.js`, two handlers added to `ws.js`, and new message routing in `hub.go`'s `readPump`. No new dependencies, no build step changes.
+`sync.js` — one new file, ~120 lines. It plugs into the existing architecture with minimal surface changes: one line in `player.js`, two handlers added to `ws.js`, and a new `SyncEvent` type in `hub.go`. No new dependencies, no build step changes.
 
 The sync engine receives authoritative playback commands from the server, applies them unconditionally (seek to position, play or pause), updates `roomState.playback`, and lets `player.js` drive the video. It runs a Web Worker heartbeat to catch drift in backgrounded tabs.
 
 **Principles applied:**
-- **Fast** — no queues, no async chains. `sync.js` listens to existing `player:action` events.
+- **Fast** — no queues, no async chains. `sync.js` listens to existing `player:action` events. Server processes sync commands on the hub goroutine with zero lock contention.
 - **Secure** — server is sole authority. Clients never trust each other. All playback state flows server → all clients.
-- **Light** — ~100 lines, no new dependencies, no build step changes.
+- **Light** — ~120 lines, no new dependencies, no build step changes. Typed payload struct eliminates per-broadcast heap allocations.
 - **Smooth** — server-computed positions guarantee universal truth. Drift guard catches background-tab divergence.
 
 ---
@@ -26,7 +26,7 @@ frontend/public/js/
 └── ui.js           No changes — renders from roomState.playback
 ```
 
-**Go server:** add `sync_command` handler in `readPump`'s switch — validate, compute position, update room state, call `broadcastToRoom` directly (includes sender). Add `sync_state` send on join if room has playback state. Clean up `playbackStates` when room empties. No clock sync. No changes to `handleBroadcast`. No new routes. No Redis schema changes.
+**Go server:** add `SyncEvent` to the Hub's event system — `readPump` sends a `SyncEvent` into `h.events`; the hub goroutine processes it via `handleSyncCommand`. Add `sync_state` send on register if room has playback state. Clean up `playbackStates` when room empties. No clock sync. No new routes. No Redis schema changes.
 
 ---
 
@@ -49,8 +49,9 @@ The flow:
 
 1. User clicks play → `player:action` fires with `{ action: 'play' }`.
 2. `sync.js` intercepts, sends `sync_command` to server.
-3. Server validates, computes authoritative position, broadcasts to all clients including sender.
-4. `applySync` fires on all clients — seek to position, execute action.
+3. `readPump` sends a `SyncEvent` into `h.events`.
+4. Hub goroutine picks it up, validates, computes authoritative position, broadcasts to all clients including sender.
+5. `applySync` fires on all clients — seek to position, execute action.
 
 **Effect:** there is a ~50–150ms perceived delay between clicking and the video responding. This is the cost of universal truth. Every user's video is pulled to the exact same server-computed position on every command, guaranteeing sync never drifts cumulatively.
 
@@ -58,7 +59,7 @@ The flow:
 
 ## Message Protocol
 
-All messages use the existing `{ type, payload }` envelope from Step 1.
+All messages use the existing `{ type, payload }` envelope.
 
 ### Client → Server
 
@@ -73,36 +74,9 @@ wsSend('sync_command', { action: 'seek', position: 8043.7 })
 ### Server → All Clients (Authoritative Broadcast)
 
 ```json
-{
-  "type": "sync_command",
-  "payload": {
-    "action": "play",
-    "position": 4521.3,
-    "isPlaying": true
-  }
-}
-```
-
-```json
-{
-  "type": "sync_command",
-  "payload": {
-    "action": "pause",
-    "position": 4589.1,
-    "isPlaying": false
-  }
-}
-```
-
-```json
-{
-  "type": "sync_command",
-  "payload": {
-    "action": "seek",
-    "position": 8043.7,
-    "isPlaying": true
-  }
-}
+{ "type": "sync_command", "payload": { "action": "play",  "position": 4521.3, "isPlaying": true  } }
+{ "type": "sync_command", "payload": { "action": "pause", "position": 4589.1, "isPlaying": false } }
+{ "type": "sync_command", "payload": { "action": "seek",  "position": 8043.7, "isPlaying": true  } }
 ```
 
 `position` is the authoritative playback position computed by the server. `isPlaying` is the resulting state. Clients seek to `position` and then play or pause based on `isPlaying`. No interpretation, no compensation.
@@ -110,17 +84,10 @@ wsSend('sync_command', { action: 'seek', position: 8043.7 })
 ### Server → Late Joiner
 
 ```json
-{
-  "type": "sync_state",
-  "payload": {
-    "action": "seek",
-    "position": 4589.1,
-    "isPlaying": true
-  }
-}
+{ "type": "sync_state", "payload": { "action": "seek", "position": 4589.1, "isPlaying": true } }
 ```
 
-If `isPlaying` is true, server computes `position = lastRecordedPosition + (now - recordedAt) / 1000` before sending. Client processes through standard `applySync()` — no special-casing.
+If `isPlaying` is true, server computes `position = lastRecordedPosition + time.Since(recordedAt).Seconds()` before sending. Client processes through standard `applySync()` — no special-casing.
 
 ---
 
@@ -130,59 +97,63 @@ If `isPlaying` is true, server computes `position = lastRecordedPosition + (now 
 
 ```go
 type RoomPlaybackState struct {
-    LastRecordedPosition float64 // seconds — the canonical position at recordedAt
-    RecordedAt           int64   // unix ms — when this position was recorded
-    IsPlaying            bool    // true = playing, false = paused
+    LastRecordedPosition float64
+    RecordedAt           time.Time // preserves monotonic clock — use now.Sub(RecordedAt).Seconds()
+    IsPlaying            bool
 }
 ```
 
-One struct per room, stored in a `map[string]RoomPlaybackState` on the Hub.
+One struct per room, stored in `h.playbackStates` on the Hub. **Hub-goroutine-only — no mutex needed.** All reads and writes happen inside `handleSyncCommand`, `handleRegister`, and `dropClient`, which all execute on the hub goroutine via the event loop.
 
-**Initialization:** when a room's first member loads a file and the room has no playback state yet, the server defaults to:
+**Why `time.Time` not `int64`:** `time.Now().UnixMilli()` strips Go's monotonic clock component. If the server's NTP daemon steps the clock backward during a session, `elapsed` goes negative and `LastRecordedPosition` corrupts for every client in the room. `time.Time` preserves the monotonic reading. `now.Sub(state.RecordedAt).Seconds()` compares monotonic readings and is immune to NTP corrections, DST transitions, and manual clock adjustments.
+
+**Initialisation:** written on the first `sync_command` received for a room with no existing playback state. Defaults to position 0, paused.
+
+**Cleanup:** deleted in `dropClient` when the room empties — prevents unbounded map growth on a long-running server with many transient rooms.
+
+### Broadcast Payload Type
 
 ```go
-RoomPlaybackState{
-    LastRecordedPosition: 0,
-    RecordedAt:           time.Now().UnixMilli(),
-    IsPlaying:            false,
+type SyncCommandPayload struct {
+    Action    string  `json:"action"`
+    Position  float64 `json:"position"`
+    IsPlaying bool    `json:"isPlaying"`
 }
 ```
 
-This is written on the first `sync_command` received for a room that has no existing playback state.
-
-**Cleanup:** when the last member leaves a room and the room is deleted from `h.rooms`, the corresponding entry is also deleted from `h.playbackStates`:
-
-```go
-delete(h.playbackStates, client.roomCode)
-```
-
-This prevents unbounded growth of the map on a long-running server with many transient rooms.
+Used for both `sync_command` and `sync_state` messages. Typed struct instead of `map[string]interface{}` — eliminates a heap allocation and reflection-based marshal on every broadcast. At N clients per room each sync command triggers N marshals; this matters on the hot path.
 
 ---
 
 ## Server-Side Processing
 
-### `readPump` routing
+### Event Routing — `readPump`
+
+`sync_command` messages are sent into `h.events` as a `SyncEvent`. The hub goroutine processes them via `handleSyncCommand`. This is the key architectural difference from a naive direct call:
 
 ```go
-// hub.go — readPump switch (add alongside existing 'relay' case)
-switch env.Type {
+// readPump switch
 case "relay":
-    c.hub.broadcast <- &Message{
+    c.hub.events <- &RelayEvent{
         roomCode:     c.roomCode,
         senderUserId: c.userId,
         data:         raw,
     }
 case "sync_command":
-    c.hub.handleSyncCommand(c, env.Payload)
-default:
-    // unknown — drop silently
-}
+    // Routed to hub goroutine via SyncEvent — handleSyncCommand runs there,
+    // so h.playbackStates needs no mutex. broadcastToRoom reads h.rooms on
+    // the hub goroutine — also safe with no lock.
+    c.hub.events <- &SyncEvent{
+        client: c,
+        raw:    env.Payload,
+    }
 ```
 
-`handleSyncCommand` is called directly on the Hub from `readPump` — it does **not** go through the `broadcast` channel, because that channel's consumer (`handleBroadcast`) excludes the sender. Direct call to `broadcastToRoom` is the only way to guarantee the sender receives their own echo.
+**Why not call `handleSyncCommand` directly from `readPump`:** a direct call runs on the readPump goroutine. `broadcastToRoom` then reads `h.rooms` on the readPump goroutine while the hub goroutine may be writing it in `handleRegister` or `dropClient`. Go maps are not safe for concurrent read+write — this panics. Routing through `h.events` guarantees `handleSyncCommand` runs on the hub goroutine, where `h.rooms` and `h.playbackStates` are owned exclusively.
 
 ### `handleSyncCommand`
+
+Runs on the hub goroutine. No mutex needed for `h.playbackStates` or `h.rooms`.
 
 ```go
 func (h *Hub) handleSyncCommand(c *Client, raw json.RawMessage) {
@@ -190,22 +161,30 @@ func (h *Hub) handleSyncCommand(c *Client, raw json.RawMessage) {
         Action   string  `json:"action"`
         Position float64 `json:"position"`
     }
-    if err := json.Unmarshal(raw, &p); err != nil { return }
+    if err := json.Unmarshal(raw, &p); err != nil {
+        return
+    }
 
-    // Validate action
-    validActions := map[string]bool{"play": true, "pause": true, "seek": true}
-    if !validActions[p.Action] { return }
+    // Zero-allocation validation — no map literal allocated per call.
+    switch p.Action {
+    case "play", "pause", "seek":
+    default:
+        return
+    }
 
-    // Rate limit — max 5 sync commands/second per client
-    now := time.Now().UnixMilli()
-    if now-c.lastSyncWindow > 1000 {
+    // Rate limit — max 5 sync commands per second per client.
+    // Monotonic arithmetic — immune to clock adjustments.
+    now := time.Now()
+    if now.Sub(c.lastSyncWindow) > time.Second {
         c.lastSyncWindow = now
         c.syncCount = 0
     }
     c.syncCount++
-    if c.syncCount > 5 { return }
+    if c.syncCount > 5 {
+        return
+    }
 
-    h.mu.Lock()
+    // h.playbackStates — hub goroutine only, no mutex.
     state, exists := h.playbackStates[c.roomCode]
     if !exists {
         state = RoomPlaybackState{
@@ -220,106 +199,89 @@ func (h *Hub) handleSyncCommand(c *Client, raw json.RawMessage) {
 
     switch p.Action {
     case "play":
-        // Only process if currently paused — silent drop if already playing
         if state.IsPlaying {
-            h.mu.Unlock()
-            return
+            return // silent drop — already playing
         }
-        // Position stays the same — pause already recorded it
         broadcastPosition = state.LastRecordedPosition
         state.RecordedAt = now
         state.IsPlaying = true
         broadcastIsPlaying = true
 
     case "pause":
-        // Only process if currently playing — silent drop if already paused
         if !state.IsPlaying {
-            h.mu.Unlock()
-            return
+            return // silent drop — already paused
         }
-        // Compute current position lazily
-        elapsed := float64(now-state.RecordedAt) / 1000.0
-        state.LastRecordedPosition = state.LastRecordedPosition + elapsed
+        // Advance position lazily — now.Sub uses monotonic readings.
+        state.LastRecordedPosition += now.Sub(state.RecordedAt).Seconds()
         state.RecordedAt = now
         state.IsPlaying = false
         broadcastPosition = state.LastRecordedPosition
         broadcastIsPlaying = false
 
     case "seek":
-        // Validate seek position
-        if p.Position < 0 || p.Position >= 86400 {
-            h.mu.Unlock()
+        if p.Position < 0 || p.Position >= MaxPlaybackPositionSeconds {
             return
         }
         state.LastRecordedPosition = p.Position
         state.RecordedAt = now
-        // isPlaying remains unchanged
+        // isPlaying unchanged — seek does not affect play/pause state.
         broadcastPosition = p.Position
         broadcastIsPlaying = state.IsPlaying
     }
 
     h.playbackStates[c.roomCode] = state
-    h.mu.Unlock()
 
-    // Broadcast to all clients including sender
-    h.broadcastToRoom(c.roomCode, makeEnvelope("sync_command", map[string]interface{}{
-        "action":    p.Action,
-        "position":  broadcastPosition,
-        "isPlaying": broadcastIsPlaying,
+    // Broadcast to all clients including sender — no local optimism.
+    h.broadcastToRoom(c.roomCode, makeEnvelope("sync_command", SyncCommandPayload{
+        Action:    p.Action,
+        Position:  broadcastPosition,
+        IsPlaying: broadcastIsPlaying,
     }))
 }
 ```
 
-Rate limit fields (`lastSyncWindow int64`, `syncCount int`) are added to the `Client` struct. They are read and written only in `readPump` — which runs in the client's own goroutine — so no mutex is needed for them.
+**Rate-limit fields:** `lastSyncWindow time.Time` and `syncCount int` live on `Client`. They are read and written only inside `handleSyncCommand`, which runs on the hub goroutine — no mutex needed.
+
+**`MaxPlaybackPositionSeconds`:** defined as a named constant in `config.go` (value: 86400). No magic numbers in handler logic.
 
 ### Late Joiner — `handleRegister`
 
+Runs on the hub goroutine. `h.playbackStates` is safe to read with no lock.
+
 ```go
 // Inside handleRegister, after sending room_state
-h.mu.RLock()
-state, exists := h.playbackStates[client.roomCode]
-h.mu.RUnlock()
-
-if exists {
-    now := time.Now().UnixMilli()
+if state, exists := h.playbackStates[client.roomCode]; exists {
     position := state.LastRecordedPosition
     if state.IsPlaying {
-        elapsed := float64(now-state.RecordedAt) / 1000.0
-        position = position + elapsed
+        // time.Since uses the monotonic reading in state.RecordedAt.
+        position += time.Since(state.RecordedAt).Seconds()
     }
-
     // Compute position locally for this send — do NOT persist the rebase.
-    // The original state remains unchanged so future calculations
-    // (lastRecordedPosition + elapsed) are always correct.
-    client.send <- makeEnvelope("sync_state", map[string]interface{}{
-        "action":    "seek",
-        "position":  position,
-        "isPlaying": state.IsPlaying,
+    // The original RecordedAt stays unchanged so all future elapsed
+    // calculations remain correct regardless of how many clients join.
+    client.send <- makeEnvelope("sync_state", SyncCommandPayload{
+        Action:    "seek",
+        Position:  position,
+        IsPlaying: state.IsPlaying,
     })
 }
 ```
 
-**No state mutation:** the computed `position` is used only for the `sync_state` message to this joining client. The persisted `RoomPlaybackState` is not modified. Any future calculation of `lastRecordedPosition + (now - recordedAt) / 1000` produces the correct current position regardless of how many clients join.
-
-**Mutex discipline:** `handleRegister` runs inside the Hub's select loop (hub goroutine). `handleSyncCommand` runs from `readPump` (per-client goroutine). Both access `playbackStates`. `handleRegister` acquires `h.mu.RLock()` for the read. `handleSyncCommand` acquires `h.mu.Lock()` for the read-modify-write. This eliminates the data race.
+**No state mutation:** the computed `position` is used only for this one `sync_state` message. The persisted `RoomPlaybackState` is untouched. Any future `lastRecordedPosition + elapsed` calculation produces the correct current position regardless of how many clients have joined.
 
 ### Room Cleanup — `dropClient`
 
 ```go
-// Inside dropClient, in the "room empties" path:
+// In the room-empties path (after h.mu.Unlock):
 if remaining == 0 {
-    delete(h.rooms, client.roomCode)
     delete(h.hostIds, client.roomCode)
     delete(h.playbackStates, client.roomCode)  // ← prevent memory leak
 }
 ```
 
-### Concurrency note
+### Conflict Resolution
 
-The Hub's `sync.RWMutex` (already used for `roomMemberCount`) is extended to cover `playbackStates` reads and writes:
-- `handleSyncCommand` (called from per-client `readPump` goroutine): acquires `h.mu.Lock()` for the state read-modify-write.
-- `handleRegister` (runs on hub goroutine): acquires `h.mu.RLock()` for the state read.
-- `dropClient` (runs on hub goroutine): acquires `h.mu.Lock()` when deleting entries (already holds it for room map deletion).
+Two users press play within milliseconds. Both send `SyncEvent` into `h.events`. The hub goroutine processes them sequentially — first one in sees `IsPlaying = false`, processes the play, sets `IsPlaying = true`, broadcasts. Second one arrives, sees `IsPlaying = true` — silent drop. Clean, deterministic, no mutex contention.
 
 ---
 
@@ -328,12 +290,28 @@ The Hub's `sync.RWMutex` (already used for `roomMemberCount`) is extended to cov
 ### sync.js — init
 
 ```js
-// sync.js
-
+// ── Drift Guard Baseline ─────────────────────────────────────────
+// Set on every applySync call. localTime === 0 means no applySync has
+// fired yet — drift checks skip to avoid overflowing expected position
+// on first load and hard-seeking to video.duration.
 let lastApply = { position: 0, localTime: 0 }
-let pendingSync = null  // stores sync message received before video metadata loads
 
-// Intercept player actions and route through server — no local action
+// ── Pending Sync ─────────────────────────────────────────────────
+// Stores a sync message received before video metadata has loaded.
+// Re-applied on loadedmetadata. Without this, seekTo is silently
+// ignored by the browser and the user starts at position 0.
+//
+// pendingSyncReceivedAt records performance.now() at storage time.
+// On loadedmetadata, if the room was playing, position is fast-forwarded
+// by the elapsed time — otherwise the late joiner lands seconds behind
+// due to the file-pick delay.
+let pendingSync = null
+let pendingSyncReceivedAt = 0
+
+// ── Player Action → Server ───────────────────────────────────────
+// Intercepts every player:action event dispatched by player.js.
+// Sends the command to the server — does NOT act on the video locally.
+// The server echo (sync_command) drives the actual video change.
 document.addEventListener('player:action', (e) => {
   const { action, position } = e.detail
   if (action === 'seek') {
@@ -343,68 +321,82 @@ document.addEventListener('player:action', (e) => {
   }
 })
 
-// Apply authoritative commands from server (including sender's own echo)
+// ── Server → Client ──────────────────────────────────────────────
 onMessage('sync_command', (payload) => applySync(payload))
 onMessage('sync_state',   (payload) => applySync(payload))
 
-// Handle video ending — notify server to pause
+// ── Video Ended ──────────────────────────────────────────────────
+// Notify server to pause when video reaches its natural end.
+// If room was already paused (another client's ended fired first),
+// server silently drops the duplicate — harmless.
 video.addEventListener('ended', () => {
   if (roomState.playback.playing) {
     wsSend('sync_command', { action: 'pause' })
   }
 })
 
-// Re-apply sync if it arrived before video metadata was ready
+// ── Deferred Apply ───────────────────────────────────────────────
+// If a sync message arrived before video metadata loaded, re-apply now.
+// Fast-forward position by elapsed time if the room was playing —
+// the server computed position X at join time, but the user may have
+// spent seconds picking a file before loadedmetadata fired.
 video.addEventListener('loadedmetadata', () => {
   if (pendingSync) {
+    if (pendingSync.isPlaying) {
+      const elapsed = (performance.now() - pendingSyncReceivedAt) / 1000
+      pendingSync = { ...pendingSync, position: pendingSync.position + elapsed }
+    }
     applySync(pendingSync)
     pendingSync = null
+    pendingSyncReceivedAt = 0
   }
 })
 ```
-
-`sync.js` does not wire the control bar. It intercepts `player:action` events that `player.js` already dispatches. `player.nudge()` (arrow key shortcuts) dispatches `player:action` with action `'seek'` — arrow key nudges sync to all clients automatically.
 
 ### player.js — changes
 
 **1. Remove local optimism from play/pause:**
 
 ```js
-// player.js
 btnPlayPause.addEventListener('click', () => {
-  if (video.paused) {
-    dispatchPlayerAction('play')         // no video.play() here
+  if (!roomState.playback.playing) {
+    dispatchPlayerAction('play')    // no video.play() here
   } else {
-    dispatchPlayerAction('pause')        // no video.pause() here
+    dispatchPlayerAction('pause')   // no video.pause() here
   }
 })
 ```
 
+Note: uses `roomState.playback.playing` not `video.paused` — the video element may report paused during a seek rebuffer while the room is still playing. Reading room state gives the correct authoritative answer.
+
 **2. Replace the `change` listener on `seekBar` with `pointerup`:**
 
 ```js
-// player.js — replace seekBar 'change' listener
 seekBar.addEventListener('pointerup', () => {
   dispatchPlayerAction('seek', video.currentTime)
+  seekBar.blur()
 })
 ```
 
-`pointerup` fires exactly once on pointer release, cross-browser, with no ambiguity. `change` on range inputs fires inconsistently during drag on iOS Safari. The `input` listener (local seek feedback) is unchanged.
+`pointerup` fires exactly once on pointer release, cross-browser, with no ambiguity. `change` on range inputs fires inconsistently during drag on iOS Safari. `seekBar.blur()` prevents subsequent keyboard arrow key presses on the focused seekbar from moving the slider and triggering local `input` seeks without a corresponding sync command — see Keyboard Gap below.
 
-**Known gap:** if a user tabs to the seekbar and uses keyboard arrow keys, the slider moves and local seek fires (`input`), but `pointerup` does not fire — no sync command is sent. This is distinct from the arrow key shortcuts (`ArrowLeft`/`ArrowRight` on the document) which do sync via `player.nudge()` → `player:action`. Documented limitation for v1.
+**Known gap:** if a user tabs to the seekbar and uses keyboard arrow keys, the slider moves and local seek fires (`input`), but `pointerup` does not fire — no sync command is sent. This is distinct from document-level `ArrowLeft`/`ArrowRight` shortcuts which do sync via `player.nudge()` → `player:action`. Documented limitation for v1.
 
 ### applySync — Unconditional
 
 ```js
 function applySync(msg) {
-  // Guard: if video metadata hasn't loaded yet, defer until loadedmetadata
+  // Guard: metadata not loaded — browser silently ignores seekTo.
+  // Defer until loadedmetadata fires.
   if (video.readyState < 1) {
     pendingSync = msg
+    pendingSyncReceivedAt = performance.now()
     return
   }
 
+  // Clamp to duration. video.duration may be Infinity for streams;
+  // NaN case guarded above by readyState < 1.
   const target = Math.min(msg.position, video.duration || Infinity)
-  // Note: video.duration may be NaN before metadata loads; guarded above.
 
   roomState.playback = {
     playing:  msg.isPlaying,
@@ -412,32 +404,22 @@ function applySync(msg) {
   }
 
   if (msg.isPlaying) {
-    player.play(target)     // seekTo(target) + video.play() — defined in player.js API
+    player.play(target)    // seekTo(target) + video.play()
   } else {
-    player.pause(target)    // seekTo(target) + video.pause() — defined in player.js API
+    player.pause(target)   // seekTo(target) + video.pause()
   }
 
-  // Record baseline for drift guard (monotonic clock)
+  // Record baseline for drift guard — monotonic clock only.
+  // performance.now() is immune to NTP corrections and clock adjustments.
   lastApply = { position: target, localTime: performance.now() }
 
   notifyUpdate()
 }
 ```
 
-**No double-seek:** `player.play(target)` and `player.pause(target)` each call `seekTo` internally as defined in the file-picker HLD's public API. `applySync` does not call `seekTo` separately. One seek per sync command.
+**No double-seek:** `player.play(target)` and `player.pause(target)` call `seekTo` internally. `applySync` does not call `seekTo` separately. One seek per sync command.
 
-**No latency compensation.** The server sent a position and a command — execute it unconditionally.
-
-**Deferred apply:** if `video.readyState < 1` (no metadata yet — common for late joiners on slow connections), the message is stored in `pendingSync` and re-applied when `loadedmetadata` fires. Without this guard, `seekTo` would be silently ignored by the browser and the user would start at position 0.
-
-### Video `ended` Event
-
-When the video reaches its end and fires `ended`, the client sends a `pause` command to the server. The server processes it normally: computes position (which will be at or near duration), sets `isPlaying = false`, broadcasts to all. This ensures:
-- Room state correctly reflects `isPlaying: false` after the movie ends
-- Late joiners don't get a position computed past the end of the video
-- All clients land at the same final position
-
-If the room was already paused (e.g., another client's `ended` event already triggered a pause), the server silently drops the duplicate — harmless.
+**No latency compensation.** The server sent a position — execute it unconditionally. Compensation would require trusting the client's clock relationship to the server's clock, which is exactly what this architecture avoids.
 
 ---
 
@@ -445,17 +427,18 @@ If the room was already paused (e.g., another client's `ended` event already tri
 
 ### Why Keep It
 
-The drift guard solves problems orthogonal to sync protocol design:
+The drift guard solves problems orthogonal to sync protocol correctness:
 - Browsers throttle backgrounded tabs — `video.currentTime` drifts while the tab is hidden
-- Natural playback rate variance (~0.01% over time) accumulates
+- Natural playback rate variance (~0.01% over time) accumulates over a long session
 - Seek rebuffering can stall playback silently
 
-Without the drift guard, two users who received the same play command could diverge by seconds over a long viewing session without any new commands.
+Without the drift guard, two users who received the same play command could diverge by seconds over a two-hour film without any new commands.
 
 ### worker.js
 
 ```js
-// worker.js — separate file, cannot be concatenated with sync.js
+// worker.js — separate file, cannot be concatenated with sync.js.
+// new Worker(url) requires a separate script URL.
 self.setInterval(() => self.postMessage({ type: 'tick' }), 5000)
 self.addEventListener('message', (e) => {
   if (e.data.type === 'check') self.postMessage({ type: 'tick' })
@@ -465,64 +448,73 @@ self.addEventListener('message', (e) => {
 ### sync.js — drift guard
 
 ```js
-// Use absolute path — relative paths resolve against the page URL, not the script location.
-// On /room/WOLF-BEAR-482134, 'worker.js' would request /room/worker.js — 404.
-let driftWorker = new Worker('/js/worker.js')
+// Factory wires onmessage and onerror on every instance — including restarts.
+// Without the factory, onerror creates a new Worker but never re-attaches
+// handlers, so drift correction silently stops after the first crash.
+let workerRetries = 0
+const MAX_WORKER_RETRIES = 3
 
-driftWorker.onerror = () => {
-  // Restart worker on crash — drift correction degrades gracefully without it
-  driftWorker = new Worker('/js/worker.js')
+function createDriftWorker() {
+  const w = new Worker('/js/worker.js')
+  w.onmessage = handleDriftTick
+  w.onerror = () => {
+    // Retry with backoff cap — prevents runaway allocation if worker.js
+    // is missing or CSP-blocked.
+    if (++workerRetries <= MAX_WORKER_RETRIES) {
+      driftWorker = createDriftWorker()
+    }
+    // Beyond MAX_WORKER_RETRIES: drift guard disabled, sync still works.
+  }
+  return w
 }
 
+let driftWorker = createDriftWorker()
+
+// Trigger an immediate drift check when a backgrounded tab returns to focus.
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') {
     driftWorker.postMessage({ type: 'check' })
   }
 })
 
-driftWorker.onmessage = () => {
-  if (lastApply.localTime === 0) return   // no baseline yet — skip until first applySync
-  if (video.paused) return                // rebuffering or genuinely paused — skip
-  if (!roomState.playback.playing) return // room is paused — skip
+function handleDriftTick() {
+  // No baseline yet — skip until first applySync fires.
+  // Without this guard: on first load elapsed is enormous, expected overflows,
+  // hard-seek clamps to video.duration → user lands at end of video.
+  if (lastApply.localTime === 0) return
+
+  // During seek rebuffer, video.paused === true while
+  // roomState.playback.playing may still be true.
+  // Use video.paused — not roomState — to avoid spurious correction.
+  if (video.paused) return
+  if (!roomState.playback.playing) return
 
   const elapsed  = (performance.now() - lastApply.localTime) / 1000
   const expected = lastApply.position + elapsed
   const drift    = Math.abs(expected - video.currentTime)
 
   if (drift > 2) {
-    video.playbackRate = 1.0    // reset rate before hard seek
+    // Hard seek — reset rate first in case a previous tick left it at 1.05.
+    // Without the reset, rate stays elevated indefinitely after a hard seek.
+    video.playbackRate = 1.0
     player.seekTo(expected)
   } else if (drift > 0.5) {
+    // Soft correction — nudge rate toward expected position.
     video.playbackRate = expected > video.currentTime ? 1.05 : 0.95
   } else {
+    // In sync — restore normal rate.
     video.playbackRate = 1.0
   }
 }
 ```
 
-**`lastApply.localTime === 0` guard:** without this, on first load `elapsed` is enormous, `expected` overflows, and the hard-seek path clamps to `video.duration` — landing the user at the end of the video. This guard is load-bearing.
-
-**`video.playbackRate = 1.0` before hard seek:** if a previous tick set rate to 1.05 and drift then grows past 2s, the hard seek fires but rate stays at 1.05 indefinitely. Reset rate explicitly before seeking.
-
-**Why `video.paused` not just `roomState.playback.playing`:** during seek rebuffer, the video element reports `paused = true` while `roomState.playback.playing` may still be `true`. Using `video.paused` prevents spurious drift correction against a buffering video.
-
-**Monotonic clock (`performance.now()`):** `Date.now()` is wall-clock time and can jump backward or forward on NTP corrections, daylight saving transitions, or manual user adjustments. This would produce wildly wrong `elapsed` values and trigger spurious hard seeks. `performance.now()` is monotonic, immune to clock adjustments, and appropriate here since both the baseline and the check are local to the page session.
-
 **Drift baseline is purely local:** `lastApply.position` is the server-computed position at the moment the client received and applied the command. `lastApply.localTime` is `performance.now()` at that moment. Expected position is computed from elapsed local time — no server clock involved, no offset needed.
-
----
-
-## Conflict Resolution
-
-Two users press play within milliseconds. The Hub acquires the write mutex for each `handleSyncCommand` call. First to acquire the lock sees `isPlaying = false`, processes the play, sets `isPlaying = true`, broadcasts. The second acquires the lock, sees `isPlaying = true` — silent drop. Clean, deterministic.
-
-Play vs. pause conflict: first to the server wins, its state is broadcast. The losing client sees the room respond to the winner's action. Correct and expected behaviour.
 
 ---
 
 ## Seek Echo — Acknowledged Behaviour
 
-When a user drags the seekbar, the `input` listener moves the video locally for visual feedback during the drag. On `pointerup`, the sync command is sent. When the server echo arrives, `applySync` seeks to approximately the same position the video is already at. This may cause a brief rebuffer on some browsers but not a visible position jump. Accepted v1 behaviour — suppressing the echo for the sender would require tracking "pending" commands, reintroducing complexity that contradicts the no-local-optimism model.
+When a user drags the seekbar, the `input` listener moves the video locally for visual feedback during the drag. On `pointerup`, the sync command is sent. When the server echo arrives, `applySync` seeks to approximately the same position the video is already at. This may cause a brief rebuffer on some browsers but not a visible position jump. Accepted v1 behaviour — suppressing the echo for the sender would require tracking pending commands, reintroducing complexity that contradicts the no-local-optimism model.
 
 ---
 
@@ -530,30 +522,34 @@ When a user drags the seekbar, the `input` listener moves the video locally for 
 
 | Scenario | Handling |
 |---|---|
-| User joins while playing | Server computes `lastRecordedPosition + elapsed`, sends `sync_state` with `isPlaying: true`; `applySync` seeks and plays |
+| User joins while playing | Server computes `lastRecordedPosition + time.Since(recordedAt).Seconds()`, sends `sync_state` with `isPlaying: true`; `applySync` seeks and plays |
 | User joins while paused | Server sends `sync_state` with `isPlaying: false` and current `lastRecordedPosition`; `applySync` seeks and pauses |
 | User joins mid-scrub | Server sends pre-scrub position. User waits for final seek command. Accepted for v1 |
 | Tab backgrounds and returns | `visibilitychange` triggers immediate drift check; correction within one tick |
 | User offline mid-session | Delayed delivery safe — broadcast carries ground truth position. Seek there unconditionally |
 | Seek < 0 | Server rejects, drops message silently |
-| Seek ≥ 86400 | Server rejects, drops message silently |
+| Seek ≥ MaxPlaybackPositionSeconds | Server rejects, drops message silently |
 | Seek beyond `video.duration` | Client clamps: `Math.min(target, video.duration \|\| Infinity)` |
 | Play when already playing | Server silent drop — no broadcast, no state change |
 | Pause when already paused | Server silent drop — no broadcast, no state change |
-| Seek spam | `pointerup` debounce (fires once on release) + server rate limiter (5/s) |
+| Seek spam | `pointerup` fires once on release + server rate limiter (5/s per client) |
 | Slow client blocking broadcast | `broadcastToRoom` uses non-blocking `select/default`; dead connections evicted after broadcast loop |
+| Two users press play simultaneously | Hub goroutine processes `SyncEvent`s sequentially — first wins, second sees `IsPlaying = true` and drops silently |
 | Server restart | In-memory state lost. Reconnecting clients get no `sync_state`; wait for next user command. Hard failure accepted for v1 |
 | Late joiner beyond duration | Client clamps to `video.duration`; silently placed at end. Documented limitation |
 | Seek rebuffer during drift check | `video.paused` gate prevents spurious correction while buffering |
 | No baseline yet (first load) | `lastApply.localTime === 0` guard skips drift checks until first `applySync` fires |
-| Seekbar keyboard navigation | Tab to seekbar + arrow keys moves slider locally (`input` fires) but no `pointerup` → no sync command. Documented gap for v1. Distinct from document-level arrow key shortcuts which sync via `player.nudge()` |
-| `video.duration` NaN before metadata | Guarded by `video.readyState < 1` check — sync deferred until `loadedmetadata` |
+| Seekbar keyboard navigation | Tab to seekbar + arrow keys: `seekBar.blur()` on `pointerup` removes focus after mouse seek; keyboard-only navigation still does not sync — documented gap for v1 |
+| `video.duration` NaN before metadata | Guarded by `video.readyState < 1` — sync deferred until `loadedmetadata` |
 | Perceived delay on initiating user | ~50–150ms between click and video response. Imperceptible. Cost of universal truth |
-| Sync arrives before metadata loads | Stored in `pendingSync`, re-applied on `loadedmetadata`. User starts at correct position |
+| Sync arrives before metadata loads | Stored in `pendingSync`, position fast-forwarded by elapsed time on `loadedmetadata` |
 | Video reaches end | `ended` event triggers pause command to server; room state correctly reflects `isPlaying: false` |
 | Multiple clients hit `ended` simultaneously | First pause processed, subsequent ones silently dropped (already paused) |
 | Room emptied and re-created | `playbackStates` entry deleted on empty; fresh state created on first sync command in new session |
-| NTP clock adjustment during playback | Drift guard uses `performance.now()` (monotonic) — immune to wall-clock jumps |
+| NTP clock adjustment on server | `RecordedAt` is `time.Time` — `now.Sub(RecordedAt)` uses monotonic readings, immune to wall-clock jumps |
+| NTP clock adjustment on client | Drift guard uses `performance.now()` (monotonic) — immune to wall-clock jumps |
+| Drift worker crashes | `onerror` restarts via `createDriftWorker()` factory, up to `MAX_WORKER_RETRIES`. Beyond that: drift guard disabled gracefully, sync unaffected |
+| Drift worker missing or CSP-blocked | Retry cap prevents runaway Worker allocation. Sync still works without drift guard |
 
 ---
 
@@ -571,29 +567,31 @@ When a user drags the seekbar, the `input` listener moves the video locally for 
 
 ## Build Sequence
 
-1. **Go:** Add `lastSyncWindow int64` and `syncCount int` to `Client` struct.
-2. **Go:** Add `RoomPlaybackState` struct and `playbackStates map[string]RoomPlaybackState` to Hub.
-3. **Go:** Add `sync_command` case to `readPump` switch — call `handleSyncCommand`. Implement `handleSyncCommand`: validate, rate-limit, compute position, update playback state, `broadcastToRoom`.
-4. **Go:** Add `sync_state` send in `handleRegister` — if room has playback state, compute elapsed position if `isPlaying` (read-only, no persist), send `sync_state` to joining client. Acquire `h.mu.RLock()` for the read.
-5. **Go:** Add `delete(h.playbackStates, roomCode)` in `dropClient` room-empty path.
-6. **Go test:** Two tabs, same room — play/pause/seek stays locked; sender sees their own video respond only after echo.
-7. **Client:** `player.js` — remove local `video.play()`/`video.pause()` from button handler; change `seekBar 'change'` → `'pointerup'` for `dispatchPlayerAction`.
-8. **Client:** `sync.js` — `player:action` listener sends `wsSend('sync_command', ...)`; `sync_command` and `sync_state` handlers call `applySync`; implement `applySync` with `readyState` guard and `pendingSync` defer.
-9. **Client:** `sync.js` — `ended` event handler sends pause command.
-10. **Client:** `worker.js` — 5s tick + `check` message response.
-11. **Client:** `sync.js` — drift guard with `lastApply.localTime === 0` guard, `video.paused` gate, `performance.now()` monotonic clock, rate-reset before hard seek, `playbackRate` nudge for 0.5–2s, hard seek + rate reset for >2s.
-12. **Integration test:** Three tabs, same room:
+1. **Go:** Add `lastSyncWindow time.Time` and `syncCount int` to `Client` struct.
+2. **Go:** Add `RoomPlaybackState` struct (`RecordedAt time.Time`) and `playbackStates map[string]RoomPlaybackState` to Hub. Add `SyncCommandPayload` typed struct.
+3. **Go:** Add `MaxPlaybackPositionSeconds = 86400` to `config.go`.
+4. **Go:** Add `SyncEvent{client, raw}` type with `execute()` calling `handleSyncCommand`. Add `sync_command` case to `readPump` switch sending `SyncEvent` into `h.events`.
+5. **Go:** Implement `handleSyncCommand` on hub goroutine: zero-allocation action switch, monotonic rate limit, `time.Since` elapsed arithmetic, `SyncCommandPayload` broadcast.
+6. **Go:** Add `sync_state` send in `handleRegister` — if room has playback state, compute elapsed with `time.Since` (no persist), send `SyncCommandPayload` to joining client. Hub-goroutine-only, no mutex.
+7. **Go:** Add `delete(h.playbackStates, roomCode)` in `dropClient` room-empty path (outside mutex, after unlock).
+8. **Go test:** Two tabs, same room — play/pause/seek stays locked; sender sees their own video respond only after echo.
+9. **Client:** `player.js` — remove local `video.play()`/`video.pause()` from button handler; change to `roomState.playback.playing` check; change `seekBar 'change'` → `'pointerup'` with `seekBar.blur()`.
+10. **Client:** `sync.js` — `player:action` listener sends `wsSend('sync_command', ...)`; `sync_command` and `sync_state` handlers call `applySync`; implement `applySync` with `readyState` guard and `pendingSync`/`pendingSyncReceivedAt` defer with elapsed fast-forward.
+11. **Client:** `sync.js` — `ended` event handler sends pause command.
+12. **Client:** `worker.js` — 5s tick + `check` message response.
+13. **Client:** `sync.js` — `createDriftWorker()` factory with `onmessage`/`onerror` re-wiring and retry cap; `handleDriftTick` with `localTime === 0` guard, `video.paused` gate, `performance.now()` monotonic clock, rate-reset before hard seek, `playbackRate` nudge for 0.5–2s, hard seek + rate reset for >2s.
+14. **Integration test:** Three tabs, same room:
     - play/pause/seek stays locked across all three
-    - late joiner catches up correctly
+    - late joiner catches up correctly, position fast-forwarded by file-pick delay
     - backgrounded tab corrects on return
     - initiating user sees their own video respond only after server echo
     - arrow key nudges (`ArrowLeft`/`ArrowRight`) sync to all clients
     - seekbar keyboard navigation (tab + arrow) does not sync — local only
     - double-tap play while playing — silent drop, no effect
     - video ends — room pauses for all clients
-    - join before metadata loads — sync applies after loadedmetadata
+    - join before metadata loads — sync applies after loadedmetadata with elapsed correction
 
-Steps 1–8 are testable end-to-end before the Worker is written. The Worker is additive — sync works without it, degrading gracefully when tabs are backgrounded.
+Steps 1–10 are testable end-to-end before the Worker is written. The Worker is additive — sync works without it, degrading gracefully when tabs are backgrounded.
 
 ---
 
