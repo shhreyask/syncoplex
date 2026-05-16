@@ -8,7 +8,14 @@
 //   Landing → Create/Join → Lobby (no connection yet)
 //   User enters name → clicks Set Name → WebSocket connects
 //   wsStatus === 'connected' → Pick File & Watch button appears
-//   user picks file → player:ready → showView('watch')
+//   user picks file → fingerprint computed → server verdict arrives
+//   verdict === 'valid' → showView('watch')   ← ONLY path to watch
+//   verdict === 'mismatch' → red error above button, re-pick on click
+//
+// Note: player:ready no longer triggers showView('watch'). The
+// fingerprint verdict is the sole gate. player:ready always fires
+// before the verdict (~200ms earlier), so the video is guaranteed
+// ready by the time the transition happens.
 
 // ── Element References ───────────────────────────────────────────
 
@@ -21,23 +28,18 @@ const btnJoin       = $('btn-join')
 const landingError  = $('landing-error')
 
 // Lobby
-const lobbyRoomCode     = $('lobby-room-code')
-const btnCopyCode       = $('btn-copy-code')
-const inputName         = $('input-name')
-const btnSetName        = $('btn-set-name')
-const lobbyError        = $('lobby-error')
-const wsStatusDot       = $('ws-status-indicator')
-const wsStatusLabel     = $('ws-status-label')
-const membersList       = $('members-list')
-const btnLeaveLobby     = $('btn-leave-lobby')
-const btnPickFile       = $('btn-pick-file')
-
-// Fingerprint verdict UI
-const fingerprintSpinner  = $('fingerprint-spinner')   // visible while pending + file chosen
-const fingerprintValid    = $('fingerprint-valid')      // ✓ shown on valid
-const fingerprintMismatch = $('fingerprint-mismatch')   // ✗ block shown on mismatch
-const fingerprintError    = $('fingerprint-error')      // shown on timeout / Worker crash
-const btnJoinWatch        = $('btn-join-watch')         // the Join button — gated on verdict
+const lobbyRoomCode      = $('lobby-room-code')
+const btnCopyCode        = $('btn-copy-code')
+const inputName          = $('input-name')
+const btnSetName         = $('btn-set-name')
+const lobbyError         = $('lobby-error')
+const wsStatusDot        = $('ws-status-indicator')
+const wsStatusLabel      = $('ws-status-label')
+const membersList        = $('members-list')
+const btnLeaveLobby      = $('btn-leave-lobby')
+const btnPickFile        = $('btn-pick-file')
+const fingerprintSpinner = $('fingerprint-spinner')
+const fingerprintError   = $('fingerprint-error')
 
 // Reconnect pill (injected into body)
 const reconnectPill = (() => {
@@ -169,21 +171,11 @@ btnLeaveLobby.addEventListener('click', () => {
   showView('landing')
 })
 
-// "Pick File & Watch" — only visible when connected, calls player directly
+// "Pick File & Watch" — visible only when connected.
+// On mismatch the button stays visible and re-opens the picker so the
+// user can select a different file. On valid the verdict handler below
+// auto-transitions — the user never needs to click again.
 btnPickFile.addEventListener('click', () => player.openPicker())
-
-// "Join" — re-pick trigger on mismatch; also the primary join path.
-// Clicking while in mismatch state opens the file picker so the user
-// can select a different file. The button is disabled unless verdict is valid.
-btnJoinWatch.addEventListener('click', () => {
-  if (roomState.fileVerdict === FILE_VERDICTS.MISMATCH) {
-    player.openPicker()
-    return
-  }
-  // Verdict is valid — transition to watch view.
-  showView('watch')
-  render()
-})
 
 // ── Member List Renderer ─────────────────────────────────────────
 
@@ -238,50 +230,50 @@ const renderWsStatus = () => {
 
 // ── Fingerprint Verdict Renderer ─────────────────────────────────
 //
-// Drives the file section of the lobby based on fileVerdict and
-// fileVerdictError. Called on every render() while in lobby view.
+// Drives the small feedback area above the Pick File & Watch button.
 //
-// States:
-//   pending, no file chosen  → all indicators hidden
-//   pending, file chosen     → spinner visible
-//   pending, error           → error message visible, re-pick prompt
-//   valid                    → ✓ indicator visible, Join enabled
-//   mismatch                 → ✗ block visible, Join opens file picker
+//   pending, no file yet  → everything hidden (initial state)
+//   pending, computing    → spinner visible
+//   pending, error        → error text visible (timeout / Worker crash)
+//   valid                 → all hidden — auto-transition fires below
+//   mismatch              → red error text above button
 
 const renderFingerprintVerdict = () => {
   const verdict = roomState.fileVerdict
   const error   = roomState.fileVerdictError
   const hasFile = roomState.fileHash !== null
 
-  // Hide everything first, then show only what's needed.
-  fingerprintSpinner.hidden  = true
-  fingerprintValid.hidden    = true
-  fingerprintMismatch.hidden = true
-  fingerprintError.hidden    = true
+  // Reset both indicators, then show only what's needed.
+  fingerprintSpinner.hidden = true
+  clearError(fingerprintError)
 
-  if (verdict === FILE_VERDICTS.VALID) {
-    fingerprintValid.hidden = false
+  if (verdict === FILE_VERDICTS.MISMATCH) {
+    showError(fingerprintError, "This file doesn't match the room. Choose the correct version.")
 
-  } else if (verdict === FILE_VERDICTS.MISMATCH) {
-    fingerprintMismatch.hidden = false
-
-  } else {
-    // PENDING
+  } else if (verdict === FILE_VERDICTS.PENDING) {
     if (error) {
-      fingerprintError.textContent = error
-      fingerprintError.hidden = false
+      showError(fingerprintError, error)
     } else if (hasFile) {
-      // Hash computed or in-flight — show spinner
       fingerprintSpinner.hidden = false
     }
-    // No file chosen yet — all hidden, nothing to show
   }
-
-  // Gate the Join button: connected AND verdict is valid.
-  const canJoin = roomState.wsStatus === 'connected'
-               && verdict === FILE_VERDICTS.VALID
-  btnJoinWatch.disabled = !canJoin
+  // VALID — nothing shown; auto-transition has already fired.
 }
+
+// ── Auto-transition on valid verdict ─────────────────────────────
+//
+// This is the ONLY place showView('watch') is called for the normal
+// lobby → watch flow. By the time this fires:
+//   - fingerprintValid is true on the server (set before verdict is sent)
+//   - player:ready has already fired (video is ready — it fires ~200ms earlier)
+// So the user enters watch view with play immediately available.
+
+document.addEventListener('fingerprint:verdict', (e) => {
+  if (e.detail.verdict === FILE_VERDICTS.VALID) {
+    showView('watch')
+    render()
+  }
+})
 
 // ── Watch View Renderer ──────────────────────────────────────────
 //
@@ -356,11 +348,19 @@ document.addEventListener('keydown', (e) => {
 // ── player:ready ─────────────────────────────────────────────────
 //
 // Fired by player.js when oncanplay fires for the first time.
-// This is the only place showView('watch') is called from player context.
+//
+// IMPORTANT: this no longer calls showView('watch'). The transition
+// is owned exclusively by the fingerprint:verdict handler above.
+// This prevents the race where the user enters watch view before
+// fingerprintValid is true on the server, causing sync_commands to
+// be silently dropped.
+//
+// render() is still called here to handle the re-pick-in-watch-view
+// case — if a file is loaded while already in watch view, the overlay
+// needs to update immediately.
 
 document.addEventListener('player:ready', () => {
-  showView('watch')
-  render()  // force renderWatch() now that the view has switched
+  render()
 })
 
 // ── Main Render ──────────────────────────────────────────────────

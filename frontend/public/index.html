@@ -71,34 +71,15 @@
 
       <p class="lobby-hint">Once everyone is here, pick a file and start watching.</p>
 
-      <!-- Step 1: Pick file — visible only when connected -->
-      <button id="btn-pick-file" class="btn btn-primary" hidden>Pick File</button>
-
-      <!-- Step 2: Fingerprint verdict feedback — all hidden until a file is chosen -->
-
-      <!-- Pending: hash computing or in-flight to server -->
-      <div id="fingerprint-spinner" class="fingerprint-status" hidden>
+      <!-- Fingerprint feedback — shown above the button, hidden until a file is chosen -->
+      <div id="fingerprint-spinner" class="fingerprint-pending" hidden>
         <span class="spinner" aria-hidden="true"></span>
         <span>Checking your file…</span>
       </div>
-
-      <!-- Valid: server confirmed match -->
-      <div id="fingerprint-valid" class="fingerprint-status fingerprint-valid" hidden>
-        <span aria-hidden="true">✓</span>
-        <span>File verified</span>
-      </div>
-
-      <!-- Mismatch: server rejected — wrong file -->
-      <div id="fingerprint-mismatch" class="fingerprint-status fingerprint-mismatch" hidden>
-        <span aria-hidden="true">✗</span>
-        <span>This file doesn't match the room. Please select the correct version.</span>
-      </div>
-
-      <!-- Error: timeout or Worker crash -->
       <p id="fingerprint-error" class="inline-error" hidden></p>
 
-      <!-- Step 3: Join — enabled only when verdict is valid -->
-      <button id="btn-join-watch" class="btn btn-primary" disabled>Join &amp; Watch</button>
+      <!-- Appears only when connected — same as original Pick File & Watch -->
+      <button id="btn-pick-file" class="btn btn-primary" hidden>Pick File &amp; Watch</button>
 
       <button id="btn-leave-lobby" class="btn btn-ghost">← Leave</button>
     </div>
