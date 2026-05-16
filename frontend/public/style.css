@@ -20,6 +20,7 @@
 /* ── Base ───────────────────────────────────────────────────────── */
 html, body { height: 100%; background: var(--bg); color: var(--text); font-family: var(--font-body); font-size: 15px; }
 
+[hidden] { display: none !important; }
 /* ── View State Machine ─────────────────────────────────────────── */
 section                                  { display: none; }
 body[data-view="landing"] #view-landing  { display: flex; }

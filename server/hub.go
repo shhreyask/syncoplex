@@ -46,9 +46,9 @@ type RoomPlaybackState struct {
 	IsPlaying            bool      // use now.Sub(RecordedAt) for elapsed — immune to NTP steps
 }
 
-// RoomFingerprintState holds the canonical hash for a room and tracks which
+// RoomFileVerifyState holds the canonical hash for a room and tracks which
 // users have been validated against it. Hub-goroutine-only — no mutex needed.
-type RoomFingerprintState struct {
+type RoomFileVerifyState struct {
 	CanonicalHash   string
 	CanonicalUserId string
 	ValidatedUsers  map[string]bool // userId → true for all users who have passed
@@ -108,9 +108,9 @@ type SyncEvent struct {
 	raw    json.RawMessage
 }
 
-// FingerprintEvent — a file_fileVerify payload from a client's readPump.
+// FileVerifyEvent — a file_fileVerify payload from a client's readPump.
 // Hex has already been validated (length + charset) in readPump before enqueueing.
-type FingerprintEvent struct {
+type FileVerifyEvent struct {
 	client *Client
 	hex    string
 }
@@ -119,7 +119,7 @@ func (e *RegisterEvent)    execute(h *Hub) { h.handleRegister(e.client) }
 func (e *UnregisterEvent)  execute(h *Hub) { h.handleUnregister(e.client) }
 func (e *RelayEvent)       execute(h *Hub) { h.handleRelay(e) }
 func (e *SyncEvent)        execute(h *Hub) { h.handleSyncCommand(e.client, e.raw) }
-func (e *FingerprintEvent) execute(h *Hub) { h.handleFingerprintCommand(e.client, e.hex) }
+func (e *FileVerifyEvent) execute(h *Hub) { h.handleFileVerifyCommand(e.client, e.hex) }
 
 // ── Hub ────────────────────────────────────────────────────────────[...]
 
@@ -134,7 +134,7 @@ type Hub struct {
 	rooms             map[string]map[string]*Client
 	hostIds           map[string]string
 	playbackStates    map[string]RoomPlaybackState
-	fileVerifyStates map[string]RoomFingerprintState
+	fileVerifyStates map[string]RoomFileVerifyState
 	rdb               *redis.Client
 	events            chan HubEvent // single inbox — replaces register, unregister, broadcast
 }
@@ -159,7 +159,7 @@ func newHub(rdb *redis.Client) *Hub {
 		rooms:             make(map[string]map[string]*Client),
 		hostIds:           make(map[string]string),
 		playbackStates:    make(map[string]RoomPlaybackState),
-		fileVerifyStates: make(map[string]RoomFingerprintState),
+		fileVerifyStates: make(map[string]RoomFileVerifyState),
 		rdb:               rdb,
 		events:            make(chan HubEvent, 512),
 	}
@@ -465,12 +465,12 @@ func (h *Hub) handleSyncCommand(c *Client, raw json.RawMessage) {
 	}))
 }
 
-// ── Fingerprint Command ───────────────────────────────────────────────────[...]
+// ── FileVerify Command ───────────────────────────────────────────────────[...]
 //
-// Runs on the hub goroutine via FingerprintEvent.execute.
+// Runs on the hub goroutine via FileVerifyEvent.execute.
 // h.fileVerifyStates is hub-goroutine-only — no mutex needed.
 
-func (h *Hub) handleFingerprintCommand(c *Client, hex string) {
+func (h *Hub) handleFileVerifyCommand(c *Client, hex string) {
 	state := h.fileVerifyStates[c.roomCode] // zero value if not present
 
 	var verdict string
@@ -533,6 +533,20 @@ func (h *Hub) handleFingerprintCommand(c *Client, hex string) {
 	c.send <- makeEnvelope("fileVerify_verdict", map[string]string{
 		"verdict": verdict,
 	})
+
+	if verdict == "valid" {
+    if ps, exists := h.playbackStates[c.roomCode]; exists {
+        position := ps.LastRecordedPosition
+        if ps.IsPlaying {
+            position += time.Since(ps.RecordedAt).Seconds()
+        }
+        c.send <- makeEnvelope("sync_state", SyncCommandPayload{
+            Action:    "seek",
+            Position:  position,
+            IsPlaying: ps.IsPlaying,
+        })
+    }
+}
 }
 
 // ── Drop Client ─────────────────────────────────────────────────────────[...]
@@ -828,18 +842,18 @@ func (c *Client) readPump() {
 			}
 		case "file_fileVerify":
 			var p struct {
-				Fingerprint string `json:"fileVerify"`
+				FileVerify string `json:"fileVerify"`
 			}
 			if err := json.Unmarshal(env.Payload, &p); err != nil {
 				continue
 			}
 			// Validate: exactly 64 lowercase hex chars.
-			// Invalid strings are dropped here — never reach handleFingerprintCommand.
-			if len(p.Fingerprint) != 64 {
+			// Invalid strings are dropped here — never reach handleFileVerifyCommand.
+			if len(p.FileVerify) != 64 {
 				continue
 			}
 			valid := true
-			for _, ch := range p.Fingerprint {
+			for _, ch := range p.FileVerify {
 				if !((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f')) {
 					valid = false
 					break
@@ -848,7 +862,7 @@ func (c *Client) readPump() {
 			if !valid {
 				continue
 			}
-			c.hub.events <- &FingerprintEvent{client: c, hex: p.Fingerprint}
+			c.hub.events <- &FileVerifyEvent{client: c, hex: p.FileVerify}
 		default:
 			// Unknown type — drop silently.
 		}
