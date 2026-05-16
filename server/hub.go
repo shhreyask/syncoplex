@@ -12,7 +12,7 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// ── Upgrader ──────────────────────────────────────────────────────────────────
+// ── Upgrader ───────────────────────────────────────────────────────────[...]
 
 func newUpgrader(allowedOrigin string) websocket.Upgrader {
 	return websocket.Upgrader{
@@ -24,25 +24,34 @@ func newUpgrader(allowedOrigin string) websocket.Upgrader {
 	}
 }
 
-// ── Types ─────────────────────────────────────────────────────────────────────
+// ── Types ────────────────────────────────────────────────────────────[...]
 
 type Client struct {
-	userId         string
-	name           string
-	roomCode       string
-	sessionToken   string // held in memory; written to Redis only on disconnect
-	isReconnect    bool
-	conn           *websocket.Conn
-	send           chan []byte
-	hub            *Hub
-	lastSyncWindow time.Time // monotonic — start of current 1-second rate-limit window
-	syncCount      int       // commands received in the current window
+	userId           string
+	name             string
+	roomCode         string
+	sessionToken     string // held in memory; written to Redis only on disconnect
+	isReconnect      bool
+	conn             *websocket.Conn
+	send             chan []byte
+	hub              *Hub
+	lastSyncWindow   time.Time // monotonic — start of current 1-second rate-limit window
+	syncCount        int       // commands received in the current window
+	fingerprintValid bool      // true only after server sends a valid verdict for this client
 }
 
 type RoomPlaybackState struct {
 	LastRecordedPosition float64
 	RecordedAt           time.Time // time.Time preserves the monotonic clock reading;
 	IsPlaying            bool      // use now.Sub(RecordedAt) for elapsed — immune to NTP steps
+}
+
+// RoomFingerprintState holds the canonical hash for a room and tracks which
+// users have been validated against it. Hub-goroutine-only — no mutex needed.
+type RoomFingerprintState struct {
+	CanonicalHash   string
+	CanonicalUserId string
+	ValidatedUsers  map[string]bool // userId → true for all users who have passed
 }
 
 // SyncCommandPayload is the typed payload for both sync_command and sync_state
@@ -54,7 +63,7 @@ type SyncCommandPayload struct {
 	IsPlaying bool    `json:"isPlaying"`
 }
 
-// ── Event System ──────────────────────────────────────────────────────────────
+// ── Event System ─────────────────────────────────────────────────────────[...]
 //
 // The Hub is an event loop. One goroutine, one inbox (h.events), sequential
 // dispatch. All hub state mutations happen inside execute() on the hub goroutine.
@@ -99,29 +108,38 @@ type SyncEvent struct {
 	raw    json.RawMessage
 }
 
-func (e *RegisterEvent)   execute(h *Hub) { h.handleRegister(e.client) }
-func (e *UnregisterEvent) execute(h *Hub) { h.handleUnregister(e.client) }
-func (e *RelayEvent)      execute(h *Hub) { h.handleRelay(e) }
-func (e *SyncEvent)       execute(h *Hub) { h.handleSyncCommand(e.client, e.raw) }
+// FingerprintEvent — a file_fingerprint payload from a client's readPump.
+// Hex has already been validated (length + charset) in readPump before enqueueing.
+type FingerprintEvent struct {
+	client *Client
+	hex    string
+}
 
-// ── Hub ───────────────────────────────────────────────────────────────────────
+func (e *RegisterEvent)    execute(h *Hub) { h.handleRegister(e.client) }
+func (e *UnregisterEvent)  execute(h *Hub) { h.handleUnregister(e.client) }
+func (e *RelayEvent)       execute(h *Hub) { h.handleRelay(e) }
+func (e *SyncEvent)        execute(h *Hub) { h.handleSyncCommand(e.client, e.raw) }
+func (e *FingerprintEvent) execute(h *Hub) { h.handleFingerprintCommand(e.client, e.hex) }
+
+// ── Hub ────────────────────────────────────────────────────────────[...]
 
 type Hub struct {
 	// mu guards h.rooms against concurrent reads from HTTP handler goroutines
 	// (roomMemberCount). It is acquired for writes in handleRegister and
 	// dropClient, and for reads in roomMemberCount only.
 	//
-	// h.hostIds and h.playbackStates are accessed exclusively on the hub
-	// goroutine — they need no mutex.
-	mu             sync.RWMutex
-	rooms          map[string]map[string]*Client
-	hostIds        map[string]string
-	playbackStates map[string]RoomPlaybackState
-	rdb            *redis.Client
-	events         chan HubEvent // single inbox — replaces register, unregister, broadcast
+	// h.hostIds, h.playbackStates, and h.fingerprintStates are accessed
+	// exclusively on the hub goroutine — they need no mutex.
+	mu                sync.RWMutex
+	rooms             map[string]map[string]*Client
+	hostIds           map[string]string
+	playbackStates    map[string]RoomPlaybackState
+	fingerprintStates map[string]RoomFingerprintState
+	rdb               *redis.Client
+	events            chan HubEvent // single inbox — replaces register, unregister, broadcast
 }
 
-// ── Envelope ──────────────────────────────────────────────────────────────────
+// ── Envelope ──────────────────────────────────────────────────────────[...]
 
 type Envelope struct {
 	Type    string          `json:"type"`
@@ -134,22 +152,23 @@ func makeEnvelope(msgType string, payload interface{}) []byte {
 	return env
 }
 
-// ── Hub Constructor ───────────────────────────────────────────────────────────
+// ── Hub Constructor ────────────────────────────────────────────────────────[...]
 
 func newHub(rdb *redis.Client) *Hub {
 	return &Hub{
-		rooms:          make(map[string]map[string]*Client),
-		hostIds:        make(map[string]string),
-		playbackStates: make(map[string]RoomPlaybackState),
-		rdb:            rdb,
-		events:         make(chan HubEvent, 512),
+		rooms:             make(map[string]map[string]*Client),
+		hostIds:           make(map[string]string),
+		playbackStates:    make(map[string]RoomPlaybackState),
+		fingerprintStates: make(map[string]RoomFingerprintState),
+		rdb:               rdb,
+		events:            make(chan HubEvent, 512),
 	}
 }
 
-// ── Hub Run Loop ──────────────────────────────────────────────────────────────
+// ── Hub Run Loop ─────────────────────────────────────────────────────────[...]
 //
-// The hub goroutine. Owns rooms, hostIds, and playbackStates exclusively.
-// All mutations to these maps happen here, serialised through h.events.
+// The hub goroutine. Owns rooms, hostIds, playbackStates, and fingerprintStates
+// exclusively. All mutations to these maps happen here, serialised through h.events.
 //
 // h.rooms writes also acquire h.mu so that roomMemberCount (HTTP goroutine)
 // can read safely. All other hub state needs no synchronisation.
@@ -170,7 +189,7 @@ func (h *Hub) run() {
 	}
 }
 
-// ── Register ──────────────────────────────────────────────────────────────────
+// ── Register ──────────────────────────────────────────────────────────[...]
 
 func (h *Hub) handleRegister(client *Client) {
 	ctx := context.Background()
@@ -253,7 +272,7 @@ func (h *Hub) handleRegister(client *Client) {
 	}))
 }
 
-// ── Unregister ────────────────────────────────────────────────────────────────
+// ── Unregister ──────────────────────────────────────────────────────────[...]
 
 func (h *Hub) handleUnregister(client *Client) {
 	room, ok := h.rooms[client.roomCode]
@@ -268,7 +287,7 @@ func (h *Hub) handleUnregister(client *Client) {
 	h.dropClient(room, client)
 }
 
-// ── Relay ─────────────────────────────────────────────────────────────────────
+// ── Relay ───────────────────────────────────────────────────────────[...]
 
 func (h *Hub) handleRelay(e *RelayEvent) {
 	room, ok := h.rooms[e.roomCode]
@@ -292,7 +311,7 @@ func (h *Hub) handleRelay(e *RelayEvent) {
 	}
 }
 
-// ── Broadcast Helpers ─────────────────────────────────────────────────────────
+// ── Broadcast Helpers ───────────────────────────────────────────────────────[...]
 //
 // Both helpers run only on the hub goroutine. h.rooms is safe to read without
 // a lock — the only concurrent accessor is roomMemberCount (HTTP goroutine),
@@ -340,7 +359,7 @@ func (h *Hub) broadcastToOthers(roomCode, excludeUserId string, data []byte) {
 	}
 }
 
-// ── Sync Command ──────────────────────────────────────────────────────────────
+// ── Sync Command ─────────────────────────────────────────────────────────[...]
 //
 // Runs on the hub goroutine via SyncEvent.execute — h.rooms and h.playbackStates
 // are safe to access with no lock. Rate-limit fields (lastSyncWindow, syncCount)
@@ -352,6 +371,13 @@ func (h *Hub) broadcastToOthers(roomCode, excludeUserId string, data []byte) {
 // wall-clock adjustments that would corrupt elapsed position calculations.
 
 func (h *Hub) handleSyncCommand(c *Client, raw json.RawMessage) {
+	// Server-side enforcement — a client who has not passed fingerprint
+	// validation cannot affect room playback state regardless of what they send.
+	// This gate is independent of the client-side UI gate in the lobby.
+	if !c.fingerprintValid {
+		return
+	}
+
 	var p struct {
 		Action   string  `json:"action"`
 		Position float64 `json:"position"`
@@ -439,7 +465,77 @@ func (h *Hub) handleSyncCommand(c *Client, raw json.RawMessage) {
 	}))
 }
 
-// ── Drop Client ───────────────────────────────────────────────────────────────
+// ── Fingerprint Command ───────────────────────────────────────────────────[...]
+//
+// Runs on the hub goroutine via FingerprintEvent.execute.
+// h.fingerprintStates is hub-goroutine-only — no mutex needed.
+
+func (h *Hub) handleFingerprintCommand(c *Client, hex string) {
+	state := h.fingerprintStates[c.roomCode] // zero value if not present
+
+	var verdict string
+
+	if state.CanonicalHash == "" {
+		// Rule 1 — First fingerprint in becomes canonical.
+		state.CanonicalHash   = hex
+		state.CanonicalUserId = c.userId
+		if state.ValidatedUsers == nil {
+			state.ValidatedUsers = make(map[string]bool)
+		}
+		state.ValidatedUsers[c.userId] = true
+		c.fingerprintValid = true
+		verdict = "valid"
+
+	} else if c.userId == state.CanonicalUserId {
+		// Rule 3 — Canonical user is re-picking their file.
+		delete(state.ValidatedUsers, c.userId)
+		c.fingerprintValid = false
+
+		// Find a replacement canonical anchor from other validated users.
+		promoted := false
+		for uid := range state.ValidatedUsers {
+			state.CanonicalUserId = uid
+			// CanonicalHash stays the same — all validated users matched it.
+			promoted = true
+			break
+		}
+
+		if !promoted {
+			// No other validated users — this user is alone; update canonical.
+			state.CanonicalHash   = hex
+			state.CanonicalUserId = c.userId
+			state.ValidatedUsers[c.userId] = true
+			c.fingerprintValid = true
+			verdict = "valid"
+		} else {
+			if hex == state.CanonicalHash {
+				state.ValidatedUsers[c.userId] = true
+				c.fingerprintValid = true
+				verdict = "valid"
+			} else {
+				verdict = "mismatch"
+			}
+		}
+
+	} else {
+		// Rule 2 — Normal case: compare against canonical.
+		if hex == state.CanonicalHash {
+			state.ValidatedUsers[c.userId] = true
+			c.fingerprintValid = true
+			verdict = "valid"
+		} else {
+			verdict = "mismatch"
+		}
+	}
+
+	h.fingerprintStates[c.roomCode] = state
+
+	c.send <- makeEnvelope("fingerprint_verdict", map[string]string{
+		"verdict": verdict,
+	})
+}
+
+// ── Drop Client ─────────────────────────────────────────────────────────[...]
 
 func writeSessionOnDisconnect(ctx context.Context, rdb *redis.Client, client *Client) {
 	if client.sessionToken == "" {
@@ -462,7 +558,8 @@ func (h *Hub) dropClient(room map[string]*Client, client *Client) {
 	writeSessionOnDisconnect(ctx, h.rdb, client)
 
 	// Lock only for the h.rooms write — synchronises with roomMemberCount.
-	// hostIds and playbackStates are hub-goroutine-only; updated after unlock.
+	// hostIds, playbackStates, and fingerprintStates are hub-goroutine-only;
+	// updated after unlock.
 	h.mu.Lock()
 	delete(room, client.userId)
 	remaining := len(room)
@@ -471,10 +568,36 @@ func (h *Hub) dropClient(room map[string]*Client, client *Client) {
 	}
 	h.mu.Unlock()
 
+	// Update fingerprint state for the departing client — before the
+	// room-empty check so the canonical shifts correctly for remaining users.
+	// No verdict is sent — the departing client is gone.
+	if fpState, ok := h.fingerprintStates[client.roomCode]; ok {
+		delete(fpState.ValidatedUsers, client.userId)
+
+		if client.userId == fpState.CanonicalUserId {
+			// Canonical user left — promote any remaining validated user.
+			promoted := false
+			for uid := range fpState.ValidatedUsers {
+				fpState.CanonicalUserId = uid
+				// CanonicalHash unchanged — all validated users matched it.
+				promoted = true
+				break
+			}
+			if !promoted {
+				// No remaining validated users — reset entirely.
+				// Next file_fingerprint sets a fresh canonical.
+				fpState.CanonicalHash   = ""
+				fpState.CanonicalUserId = ""
+			}
+		}
+		h.fingerprintStates[client.roomCode] = fpState
+	}
+
 	// Cleanup hub-goroutine-only maps outside the lock.
 	if remaining == 0 {
 		delete(h.hostIds, client.roomCode)
 		delete(h.playbackStates, client.roomCode)
+		delete(h.fingerprintStates, client.roomCode)
 	}
 
 	close(client.send)
@@ -508,7 +631,7 @@ func (h *Hub) dropClient(room map[string]*Client, client *Client) {
 	}
 }
 
-// ── Room Member Count ─────────────────────────────────────────────────────────
+// ── Room Member Count ───────────────────────────────────────────────────────[...]
 //
 // Called from HTTP handler goroutines. RLock synchronises with the Lock
 // acquired during h.rooms writes in handleRegister and dropClient.
@@ -519,7 +642,7 @@ func (h *Hub) roomMemberCount(roomCode string) int {
 	return len(h.rooms[roomCode])
 }
 
-// ── TTL Heartbeat ─────────────────────────────────────────────────────────────
+// ── TTL Heartbeat ─────────────────────────────────────────────────────────[...]
 //
 // Called directly from run()'s ticker case — never routed through h.events.
 // Runs on the hub goroutine; h.rooms is safe to iterate with no lock.
@@ -535,7 +658,7 @@ func (h *Hub) handleHeartbeat() {
 	}
 }
 
-// ── WebSocket Handler ─────────────────────────────────────────────────────────
+// ── WebSocket Handler ───────────────────────────────────────────────────────[...]
 
 func handleWebSocket(hub *Hub, rdb *redis.Client, upgrader websocket.Upgrader) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -645,6 +768,8 @@ func handleWebSocket(hub *Hub, rdb *redis.Client, upgrader websocket.Upgrader) h
 			conn:         conn,
 			send:         make(chan []byte, SendBufferSize),
 			hub:          hub,
+			// fingerprintValid starts false — every connect and reconnect
+			// begins unvalidated regardless of previous session state.
 		}
 
 		// Send session token directly on the raw connection BEFORE registering
@@ -665,7 +790,8 @@ func handleWebSocket(hub *Hub, rdb *redis.Client, upgrader websocket.Upgrader) h
 		client.readPump()
 	}
 }
-// ── Read Pump ─────────────────────────────────────────────────────────────────
+
+// ── Read Pump ──────────────────────────────────────────────────────────[...]
 
 func (c *Client) readPump() {
 	defer func() {
@@ -700,13 +826,36 @@ func (c *Client) readPump() {
 				client: c,
 				raw:    env.Payload,
 			}
+		case "file_fingerprint":
+			var p struct {
+				Fingerprint string `json:"fingerprint"`
+			}
+			if err := json.Unmarshal(env.Payload, &p); err != nil {
+				continue
+			}
+			// Validate: exactly 64 lowercase hex chars.
+			// Invalid strings are dropped here — never reach handleFingerprintCommand.
+			if len(p.Fingerprint) != 64 {
+				continue
+			}
+			valid := true
+			for _, ch := range p.Fingerprint {
+				if !((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f')) {
+					valid = false
+					break
+				}
+			}
+			if !valid {
+				continue
+			}
+			c.hub.events <- &FingerprintEvent{client: c, hex: p.Fingerprint}
 		default:
 			// Unknown type — drop silently.
 		}
 	}
 }
 
-// ── Write Pump ────────────────────────────────────────────────────────────────
+// ── Write Pump ──────────────────────────────────────────────────────────[...]
 
 func (c *Client) writePump() {
 	defer c.conn.Close()
@@ -724,7 +873,7 @@ func (c *Client) writePump() {
 		websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
 }
 
-// ── Utility ───────────────────────────────────────────────────────────────────
+// ── Utility ───────────────────────────────────────────────────────────[...]
 
 func stringToUpper(s string) string {
 	result := make([]byte, len(s))
