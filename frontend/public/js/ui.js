@@ -268,10 +268,23 @@ const renderFingerprintVerdict = () => {
 //   - player:ready has already fired (video is ready — it fires ~200ms earlier)
 // So the user enters watch view with play immediately available.
 
-document.addEventListener('fileVerify:verdict', (e) => {
-  if (e.detail.verdict === FILE_VERDICTS.VALID) {
+let pendingWatchTransition = false
+
+const tryEnterWatch = () => {
+  const ready = roomState.fileState !== FILE_STATES.WAITING &&
+                roomState.fileState !== FILE_STATES.HASHING
+  if (roomState.fileVerdict === FILE_VERDICTS.VALID && ready) {
     showView('watch')
     render()
+    pendingWatchTransition = false
+  } else {
+    pendingWatchTransition = true
+  }
+}
+
+document.addEventListener('fileVerify:verdict', (e) => {
+  if (e.detail.verdict === FILE_VERDICTS.VALID) {
+    tryEnterWatch()
   }
 })
 
@@ -360,6 +373,7 @@ document.addEventListener('keydown', (e) => {
 // needs to update immediately.
 
 document.addEventListener('player:ready', () => {
+  if (pendingWatchTransition) tryEnterWatch()
   render()
 })
 

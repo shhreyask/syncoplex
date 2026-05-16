@@ -247,21 +247,6 @@ func (h *Hub) handleRegister(client *Client) {
 		"members": members,
 	})
 
-	// playbackStates — hub goroutine only, no mutex needed.
-	// Compute position locally for this send — do NOT persist the rebase so
-	// future elapsed calculations (lastRecordedPosition + elapsed) stay correct.
-	if state, exists := h.playbackStates[client.roomCode]; exists {
-		position := state.LastRecordedPosition
-		if state.IsPlaying {
-			position += time.Since(state.RecordedAt).Seconds()
-		}
-		client.send <- makeEnvelope("sync_state", SyncCommandPayload{
-			Action:    "seek",
-			Position:  position,
-			IsPlaying: state.IsPlaying,
-		})
-	}
-
 	msgType := "user_joined"
 	if client.isReconnect {
 		msgType = "user_reconnected"
