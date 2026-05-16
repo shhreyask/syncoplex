@@ -6,6 +6,13 @@
 let fingerprintWorker  = null
 let fingerprintTimeout = null
 
+// Called by ws.js onclose — cancels any in-flight server-verdict timeout
+// so a stale timeout can't overwrite a verdict that arrives after reconnect.
+const cancelFingerprintTimeout = () => {
+    clearTimeout(fingerprintTimeout)
+    fingerprintTimeout = null
+}
+
 const computeAndSendFingerprint = (file) => {
     // Tear down any in-progress fingerprint before starting a new one.
     if (fingerprintWorker) { fingerprintWorker.terminate(); fingerprintWorker = null }
@@ -65,6 +72,7 @@ document.addEventListener('player:fileloaded', (e) => {
 // Handle verdict from server.
 onMessage('fingerprint_verdict', ({ verdict }) => {
     clearTimeout(fingerprintTimeout)   // verdict arrived — cancel timeout
+    fingerprintTimeout = null
     roomState.fileVerdict      = verdict === 'valid' ? FILE_VERDICTS.VALID : FILE_VERDICTS.MISMATCH
     roomState.fileVerdictError = null
     notifyUpdate()

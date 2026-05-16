@@ -117,9 +117,13 @@ const connect = (roomCode, name) => {
     // Unknown types silently dropped
   }
 
-  ws.onclose = () => {
+    ws.onclose = () => {
     ws = null
     setWsStatus('disconnected')
+
+    // Cancel any in-flight server-verdict timeout — prevents a stale timeout
+    // from overwriting the verdict that arrives after reconnect re-validation.
+    cancelFingerprintTimeout()
 
     // Reset verdict to PENDING so the onopen re-send logic fires on reconnect.
     // fileHash is intentionally preserved — it is the re-send mechanism.
