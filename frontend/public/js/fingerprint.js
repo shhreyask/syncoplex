@@ -28,6 +28,14 @@ const computeAndSendFingerprint = (file) => {
         }
         // fileVerdict stays PENDING until server replies with fingerprint_verdict.
         notifyUpdate()
+
+        // Start a new timeout for the server verdict leg.
+        // The Worker timeout covered hashing; this one covers the round-trip.
+        fingerprintTimeout = setTimeout(() => {
+            roomState.fileVerdictError = 'Verification timed out. Try picking your file again.'
+            roomState.fileVerdict      = FILE_VERDICTS.PENDING
+            notifyUpdate()
+        }, 15000)
     }
 
     fingerprintWorker.onerror = () => {
@@ -40,7 +48,7 @@ const computeAndSendFingerprint = (file) => {
 
     fingerprintWorker.postMessage({ file })
 
-    // 15-second timeout covers both Worker stall/crash and server non-reply.
+    // 15-second timeout covers Worker stall/crash.
     fingerprintTimeout = setTimeout(() => {
         if (fingerprintWorker) { fingerprintWorker.terminate(); fingerprintWorker = null }
         roomState.fileVerdictError = 'Verification timed out. Try picking your file again.'
