@@ -12,7 +12,7 @@
 // Events dispatched:
 //   'player:ready'      → ui.js calls showView('watch')
 //   'player:action'     → sync.js routes to server
-//   'player:fileloaded' → fingerprint.js starts hashing
+//   'player:fileloaded' → fileVerify.js starts hashing
 
 // ── Element References ───────────────────────────────────────────
 
@@ -123,8 +123,8 @@ const loadFile = (file) => {
   fileError.hidden = true
   fileError.textContent = ''
 
-  // Notify fingerprint.js to begin hashing.
-  // Using an event keeps player.js decoupled from fingerprint.js —
+  // Notify fileVerify.js to begin hashing.
+  // Using an event keeps player.js decoupled from fileVerify.js —
   // consistent with how player.js communicates with sync.js.
   document.dispatchEvent(new CustomEvent('player:fileloaded', { detail: { file } }))
 }

@@ -95,12 +95,12 @@ const connect = (roomCode, name) => {
     setWsStatus('connected')
     sendJoin(name)
 
-    // Re-send a pending fingerprint hash on connect/reconnect.
+    // Re-send a pending fileVerify hash on connect/reconnect.
     // Covers two cases:
     //   1. File was picked before the WebSocket handshake completed.
-    //   2. User is reconnecting — new Client on server has fingerprintValid = false.
+    //   2. User is reconnecting — new Client on server has fileVerifyValid = false.
     if (roomState.fileHash && roomState.fileVerdict === FILE_VERDICTS.PENDING) {
-      wsSend('file_fingerprint', { fingerprint: roomState.fileHash })
+      wsSend('file_fileVerify', { fileVerify: roomState.fileHash })
     }
   }
 

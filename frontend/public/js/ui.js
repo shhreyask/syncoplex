@@ -8,12 +8,12 @@
 //   Landing → Create/Join → Lobby (no connection yet)
 //   User enters name → clicks Set Name → WebSocket connects
 //   wsStatus === 'connected' → Pick File & Watch button appears
-//   user picks file → fingerprint computed → server verdict arrives
+//   user picks file → fileVerify computed → server verdict arrives
 //   verdict === 'valid' → showView('watch')   ← ONLY path to watch
 //   verdict === 'mismatch' → red error above button, re-pick on click
 //
 // Note: player:ready no longer triggers showView('watch'). The
-// fingerprint verdict is the sole gate. player:ready always fires
+// fileVerify verdict is the sole gate. player:ready always fires
 // before the verdict (~200ms earlier), so the video is guaranteed
 // ready by the time the transition happens.
 
@@ -38,8 +38,8 @@ const wsStatusLabel      = $('ws-status-label')
 const membersList        = $('members-list')
 const btnLeaveLobby      = $('btn-leave-lobby')
 const btnPickFile        = $('btn-pick-file')
-const fingerprintSpinner = $('fingerprint-spinner')
-const fingerprintError   = $('fingerprint-error')
+const fileVerifySpinner = $('fileVerify-spinner')
+const fileVerifyError   = $('fileVerify-error')
 
 // Reconnect pill (injected into body)
 const reconnectPill = (() => {
@@ -244,17 +244,17 @@ const renderFingerprintVerdict = () => {
   const hasFile = roomState.fileHash !== null
 
   // Reset both indicators, then show only what's needed.
-  fingerprintSpinner.hidden = true
-  clearError(fingerprintError)
+  fileVerifySpinner.hidden = true
+  clearError(fileVerifyError)
 
   if (verdict === FILE_VERDICTS.MISMATCH) {
-    showError(fingerprintError, "This file doesn't match the room. Choose the correct version.")
+    showError(fileVerifyError, "This file doesn't match the room. Choose the correct version.")
 
   } else if (verdict === FILE_VERDICTS.PENDING) {
     if (error) {
-      showError(fingerprintError, error)
+      showError(fileVerifyError, error)
     } else if (hasFile) {
-      fingerprintSpinner.hidden = false
+      fileVerifySpinner.hidden = false
     }
   }
   // VALID — nothing shown; auto-transition has already fired.
@@ -264,11 +264,11 @@ const renderFingerprintVerdict = () => {
 //
 // This is the ONLY place showView('watch') is called for the normal
 // lobby → watch flow. By the time this fires:
-//   - fingerprintValid is true on the server (set before verdict is sent)
+//   - fileVerifyValid is true on the server (set before verdict is sent)
 //   - player:ready has already fired (video is ready — it fires ~200ms earlier)
 // So the user enters watch view with play immediately available.
 
-document.addEventListener('fingerprint:verdict', (e) => {
+document.addEventListener('fileVerify:verdict', (e) => {
   if (e.detail.verdict === FILE_VERDICTS.VALID) {
     showView('watch')
     render()
@@ -350,9 +350,9 @@ document.addEventListener('keydown', (e) => {
 // Fired by player.js when oncanplay fires for the first time.
 //
 // IMPORTANT: this no longer calls showView('watch'). The transition
-// is owned exclusively by the fingerprint:verdict handler above.
+// is owned exclusively by the fileVerify:verdict handler above.
 // This prevents the race where the user enters watch view before
-// fingerprintValid is true on the server, causing sync_commands to
+// fileVerifyValid is true on the server, causing sync_commands to
 // be silently dropped.
 //
 // render() is still called here to handle the re-pick-in-watch-view

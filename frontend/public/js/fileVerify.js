@@ -1,63 +1,63 @@
-// fingerprint.js — main-thread coordinator.
+// fileVerify.js — main-thread coordinator.
 // Concatenated into app.js after sync.js and before ui.js.
 // Owns: Worker lifecycle, hash storage, wsSend, verdict handling, timeout.
 // Does NOT own: UI rendering, Join button, video element, WebSocket connection.
 
-let fingerprintWorker  = null
-let fingerprintTimeout = null
+let fileVerifyWorker  = null
+let fileVerifyTimeout = null
 
 // Called by ws.js onclose — cancels any in-flight server-verdict timeout
 // so a stale timeout can't overwrite a verdict that arrives after reconnect.
 const cancelFingerprintTimeout = () => {
-    clearTimeout(fingerprintTimeout)
-    fingerprintTimeout = null
+    clearTimeout(fileVerifyTimeout)
+    fileVerifyTimeout = null
 }
 
 const computeAndSendFingerprint = (file) => {
-    // Tear down any in-progress fingerprint before starting a new one.
-    if (fingerprintWorker) { fingerprintWorker.terminate(); fingerprintWorker = null }
-    clearTimeout(fingerprintTimeout)
+    // Tear down any in-progress fileVerify before starting a new one.
+    if (fileVerifyWorker) { fileVerifyWorker.terminate(); fileVerifyWorker = null }
+    clearTimeout(fileVerifyTimeout)
 
     roomState.fileVerdict      = FILE_VERDICTS.PENDING
     roomState.fileVerdictError = null
     notifyUpdate()
 
-    fingerprintWorker = new Worker('/js/worker-fingerprint.js')
+    fileVerifyWorker = new Worker('/js/workerFileVerify.js')
 
-    fingerprintWorker.onmessage = ({ data: { hex } }) => {
-        clearTimeout(fingerprintTimeout)
-        fingerprintWorker.terminate()
-        fingerprintWorker = null
+    fileVerifyWorker.onmessage = ({ data: { hex } }) => {
+        clearTimeout(fileVerifyTimeout)
+        fileVerifyWorker.terminate()
+        fileVerifyWorker = null
 
         roomState.fileHash = hex   // stored for reconnect re-send
         if (roomState.wsStatus === 'connected') {
-            wsSend('file_fingerprint', { fingerprint: hex })
+            wsSend('file_fileVerify', { fileVerify: hex })
         }
-        // fileVerdict stays PENDING until server replies with fingerprint_verdict.
+        // fileVerdict stays PENDING until server replies with fileVerify_verdict.
         notifyUpdate()
 
         // Start a new timeout for the server verdict leg.
         // The Worker timeout covered hashing; this one covers the round-trip.
-        fingerprintTimeout = setTimeout(() => {
+        fileVerifyTimeout = setTimeout(() => {
             roomState.fileVerdictError = 'Verification timed out. Try picking your file again.'
             roomState.fileVerdict      = FILE_VERDICTS.PENDING
             notifyUpdate()
         }, 15000)
     }
 
-    fingerprintWorker.onerror = () => {
-        clearTimeout(fingerprintTimeout)
-        fingerprintWorker = null
+    fileVerifyWorker.onerror = () => {
+        clearTimeout(fileVerifyTimeout)
+        fileVerifyWorker = null
         roomState.fileVerdictError = 'Could not read your file. Try picking it again.'
         roomState.fileVerdict      = FILE_VERDICTS.PENDING
         notifyUpdate()
     }
 
-    fingerprintWorker.postMessage({ file })
+    fileVerifyWorker.postMessage({ file })
 
     // 15-second timeout covers Worker stall/crash.
-    fingerprintTimeout = setTimeout(() => {
-        if (fingerprintWorker) { fingerprintWorker.terminate(); fingerprintWorker = null }
+    fileVerifyTimeout = setTimeout(() => {
+        if (fileVerifyWorker) { fileVerifyWorker.terminate(); fileVerifyWorker = null }
         roomState.fileVerdictError = 'Verification timed out. Try picking your file again.'
         roomState.fileVerdict      = FILE_VERDICTS.PENDING
         notifyUpdate()
@@ -70,13 +70,13 @@ document.addEventListener('player:fileloaded', (e) => {
 })
 
 // Handle verdict from server.
-onMessage('fingerprint_verdict', ({ verdict }) => {
-    clearTimeout(fingerprintTimeout)   // verdict arrived — cancel timeout
-    fingerprintTimeout = null
+onMessage('fileVerify_verdict', ({ verdict }) => {
+    clearTimeout(fileVerifyTimeout)   // verdict arrived — cancel timeout
+    fileVerifyTimeout = null
     roomState.fileVerdict      = verdict === 'valid' ? FILE_VERDICTS.VALID : FILE_VERDICTS.MISMATCH
     roomState.fileVerdictError = null
     notifyUpdate()
-    document.dispatchEvent(new CustomEvent('fingerprint:verdict', {
+    document.dispatchEvent(new CustomEvent('fileVerify:verdict', {
         detail: { verdict: roomState.fileVerdict }
     }))
 })

@@ -9,7 +9,7 @@ const FILE_STATES = {
 }
 
 // ── File Verdicts ─────────────────────────────────────────────────
-// Tracks the server's verdict on the fingerprint hash.
+// Tracks the server's verdict on the fileVerify hash.
 // Independent of FILE_STATES — a file can be READY but MISMATCH.
 const FILE_VERDICTS = {
   PENDING:  'pending',   // hash computing, in-flight to server, or awaiting re-pick

@@ -37,7 +37,7 @@ type Client struct {
 	hub              *Hub
 	lastSyncWindow   time.Time // monotonic — start of current 1-second rate-limit window
 	syncCount        int       // commands received in the current window
-	fingerprintValid bool      // true only after server sends a valid verdict for this client
+	fileVerifyValid bool      // true only after server sends a valid verdict for this client
 }
 
 type RoomPlaybackState struct {
@@ -108,7 +108,7 @@ type SyncEvent struct {
 	raw    json.RawMessage
 }
 
-// FingerprintEvent — a file_fingerprint payload from a client's readPump.
+// FingerprintEvent — a file_fileVerify payload from a client's readPump.
 // Hex has already been validated (length + charset) in readPump before enqueueing.
 type FingerprintEvent struct {
 	client *Client
@@ -128,13 +128,13 @@ type Hub struct {
 	// (roomMemberCount). It is acquired for writes in handleRegister and
 	// dropClient, and for reads in roomMemberCount only.
 	//
-	// h.hostIds, h.playbackStates, and h.fingerprintStates are accessed
+	// h.hostIds, h.playbackStates, and h.fileVerifyStates are accessed
 	// exclusively on the hub goroutine — they need no mutex.
 	mu                sync.RWMutex
 	rooms             map[string]map[string]*Client
 	hostIds           map[string]string
 	playbackStates    map[string]RoomPlaybackState
-	fingerprintStates map[string]RoomFingerprintState
+	fileVerifyStates map[string]RoomFingerprintState
 	rdb               *redis.Client
 	events            chan HubEvent // single inbox — replaces register, unregister, broadcast
 }
@@ -159,7 +159,7 @@ func newHub(rdb *redis.Client) *Hub {
 		rooms:             make(map[string]map[string]*Client),
 		hostIds:           make(map[string]string),
 		playbackStates:    make(map[string]RoomPlaybackState),
-		fingerprintStates: make(map[string]RoomFingerprintState),
+		fileVerifyStates: make(map[string]RoomFingerprintState),
 		rdb:               rdb,
 		events:            make(chan HubEvent, 512),
 	}
@@ -167,7 +167,7 @@ func newHub(rdb *redis.Client) *Hub {
 
 // ── Hub Run Loop ─────────────────────────────────────────────────────────[...]
 //
-// The hub goroutine. Owns rooms, hostIds, playbackStates, and fingerprintStates
+// The hub goroutine. Owns rooms, hostIds, playbackStates, and fileVerifyStates
 // exclusively. All mutations to these maps happen here, serialised through h.events.
 //
 // h.rooms writes also acquire h.mu so that roomMemberCount (HTTP goroutine)
@@ -371,10 +371,10 @@ func (h *Hub) broadcastToOthers(roomCode, excludeUserId string, data []byte) {
 // wall-clock adjustments that would corrupt elapsed position calculations.
 
 func (h *Hub) handleSyncCommand(c *Client, raw json.RawMessage) {
-	// Server-side enforcement — a client who has not passed fingerprint
+	// Server-side enforcement — a client who has not passed fileVerify
 	// validation cannot affect room playback state regardless of what they send.
 	// This gate is independent of the client-side UI gate in the lobby.
-	if !c.fingerprintValid {
+	if !c.fileVerifyValid {
 		return
 	}
 
@@ -468,28 +468,28 @@ func (h *Hub) handleSyncCommand(c *Client, raw json.RawMessage) {
 // ── Fingerprint Command ───────────────────────────────────────────────────[...]
 //
 // Runs on the hub goroutine via FingerprintEvent.execute.
-// h.fingerprintStates is hub-goroutine-only — no mutex needed.
+// h.fileVerifyStates is hub-goroutine-only — no mutex needed.
 
 func (h *Hub) handleFingerprintCommand(c *Client, hex string) {
-	state := h.fingerprintStates[c.roomCode] // zero value if not present
+	state := h.fileVerifyStates[c.roomCode] // zero value if not present
 
 	var verdict string
 
 	if state.CanonicalHash == "" {
-		// Rule 1 — First fingerprint in becomes canonical.
+		// Rule 1 — First fileVerify in becomes canonical.
 		state.CanonicalHash   = hex
 		state.CanonicalUserId = c.userId
 		if state.ValidatedUsers == nil {
 			state.ValidatedUsers = make(map[string]bool)
 		}
 		state.ValidatedUsers[c.userId] = true
-		c.fingerprintValid = true
+		c.fileVerifyValid = true
 		verdict = "valid"
 
 	} else if c.userId == state.CanonicalUserId {
 		// Rule 3 — Canonical user is re-picking their file.
 		delete(state.ValidatedUsers, c.userId)
-		c.fingerprintValid = false
+		c.fileVerifyValid = false
 
 		// Find a replacement canonical anchor from other validated users.
 		promoted := false
@@ -505,12 +505,12 @@ func (h *Hub) handleFingerprintCommand(c *Client, hex string) {
 			state.CanonicalHash   = hex
 			state.CanonicalUserId = c.userId
 			state.ValidatedUsers[c.userId] = true
-			c.fingerprintValid = true
+			c.fileVerifyValid = true
 			verdict = "valid"
 		} else {
 			if hex == state.CanonicalHash {
 				state.ValidatedUsers[c.userId] = true
-				c.fingerprintValid = true
+				c.fileVerifyValid = true
 				verdict = "valid"
 			} else {
 				verdict = "mismatch"
@@ -521,16 +521,16 @@ func (h *Hub) handleFingerprintCommand(c *Client, hex string) {
 		// Rule 2 — Normal case: compare against canonical.
 		if hex == state.CanonicalHash {
 			state.ValidatedUsers[c.userId] = true
-			c.fingerprintValid = true
+			c.fileVerifyValid = true
 			verdict = "valid"
 		} else {
 			verdict = "mismatch"
 		}
 	}
 
-	h.fingerprintStates[c.roomCode] = state
+	h.fileVerifyStates[c.roomCode] = state
 
-	c.send <- makeEnvelope("fingerprint_verdict", map[string]string{
+	c.send <- makeEnvelope("fileVerify_verdict", map[string]string{
 		"verdict": verdict,
 	})
 }
@@ -558,7 +558,7 @@ func (h *Hub) dropClient(room map[string]*Client, client *Client) {
 	writeSessionOnDisconnect(ctx, h.rdb, client)
 
 	// Lock only for the h.rooms write — synchronises with roomMemberCount.
-	// hostIds, playbackStates, and fingerprintStates are hub-goroutine-only;
+	// hostIds, playbackStates, and fileVerifyStates are hub-goroutine-only;
 	// updated after unlock.
 	h.mu.Lock()
 	delete(room, client.userId)
@@ -568,10 +568,10 @@ func (h *Hub) dropClient(room map[string]*Client, client *Client) {
 	}
 	h.mu.Unlock()
 
-	// Update fingerprint state for the departing client — before the
+	// Update fileVerify state for the departing client — before the
 	// room-empty check so the canonical shifts correctly for remaining users.
 	// No verdict is sent — the departing client is gone.
-	if fpState, ok := h.fingerprintStates[client.roomCode]; ok {
+	if fpState, ok := h.fileVerifyStates[client.roomCode]; ok {
 		delete(fpState.ValidatedUsers, client.userId)
 
 		if client.userId == fpState.CanonicalUserId {
@@ -585,19 +585,19 @@ func (h *Hub) dropClient(room map[string]*Client, client *Client) {
 			}
 			if !promoted {
 				// No remaining validated users — reset entirely.
-				// Next file_fingerprint sets a fresh canonical.
+				// Next file_fileVerify sets a fresh canonical.
 				fpState.CanonicalHash   = ""
 				fpState.CanonicalUserId = ""
 			}
 		}
-		h.fingerprintStates[client.roomCode] = fpState
+		h.fileVerifyStates[client.roomCode] = fpState
 	}
 
 	// Cleanup hub-goroutine-only maps outside the lock.
 	if remaining == 0 {
 		delete(h.hostIds, client.roomCode)
 		delete(h.playbackStates, client.roomCode)
-		delete(h.fingerprintStates, client.roomCode)
+		delete(h.fileVerifyStates, client.roomCode)
 	}
 
 	close(client.send)
@@ -768,7 +768,7 @@ func handleWebSocket(hub *Hub, rdb *redis.Client, upgrader websocket.Upgrader) h
 			conn:         conn,
 			send:         make(chan []byte, SendBufferSize),
 			hub:          hub,
-			// fingerprintValid starts false — every connect and reconnect
+			// fileVerifyValid starts false — every connect and reconnect
 			// begins unvalidated regardless of previous session state.
 		}
 
@@ -826,9 +826,9 @@ func (c *Client) readPump() {
 				client: c,
 				raw:    env.Payload,
 			}
-		case "file_fingerprint":
+		case "file_fileVerify":
 			var p struct {
-				Fingerprint string `json:"fingerprint"`
+				Fingerprint string `json:"fileVerify"`
 			}
 			if err := json.Unmarshal(env.Payload, &p); err != nil {
 				continue

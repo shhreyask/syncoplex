@@ -1,5 +1,5 @@
-// worker-fingerprint.js — separate file, never concatenated into app.js.
-// Spawned by fingerprint.js; terminated immediately after posting the result.
+// worker-file-verify.js — separate file, never concatenated into app.js.
+// Spawned by file-verify.js; terminated immediately after posting the result.
 
 self.onmessage = async ({ data: { file } }) => {
     const MB   = 1024 * 1024

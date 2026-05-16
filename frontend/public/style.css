@@ -359,7 +359,7 @@ body[data-view="watch"]   #view-watch    { display: block; }
  *      (reuses .inline-error — no extra rule needed)
  */
 
-.fingerprint-pending {
+.fileVerify-pending {
   display: flex;
   align-items: center;
   gap: 0.6rem;
