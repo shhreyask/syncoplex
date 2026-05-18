@@ -520,18 +520,18 @@ func (h *Hub) handleFileVerifyCommand(c *Client, hex string) {
 	})
 
 	if verdict == "valid" {
-    if ps, exists := h.playbackStates[c.roomCode]; exists {
-        position := ps.LastRecordedPosition
-        if ps.IsPlaying {
-            position += time.Since(ps.RecordedAt).Seconds()
-        }
-        c.send <- makeEnvelope("sync_state", SyncCommandPayload{
-            Action:    "seek",
-            Position:  position,
-            IsPlaying: ps.IsPlaying,
-        })
-    }
-}
+		if ps, exists := h.playbackStates[c.roomCode]; exists {
+			position := ps.LastRecordedPosition
+			if ps.IsPlaying {
+				position += time.Since(ps.RecordedAt).Seconds()
+			}
+			c.send <- makeEnvelope("sync_state", SyncCommandPayload{
+				Action:    "seek",
+				Position:  position,
+				IsPlaying: ps.IsPlaying,
+			})
+		}
+	}
 }
 
 // ── Drop Client ─────────────────────────────────────────────────────────[...]
@@ -798,16 +798,19 @@ func (c *Client) readPump() {
 		c.conn.Close()
 	}()
 
+	var (
+		lastFileVerify  time.Time
+		fileVerifyCount int
+	)
+
 	for {
 		_, raw, err := c.conn.ReadMessage()
 		if err != nil {
-			// Normal disconnect or read deadline exceeded — exit cleanly.
 			break
 		}
 
 		var env Envelope
 		if err := json.Unmarshal(raw, &env); err != nil {
-			// Malformed message — drop silently, keep connection alive.
 			continue
 		}
 
@@ -819,8 +822,6 @@ func (c *Client) readPump() {
 				data:         raw,
 			}
 		case "sync_command":
-			// Routed to the hub goroutine via SyncEvent — handleSyncCommand
-			// runs there, so h.rooms and h.playbackStates need no mutex.
 			c.hub.events <- &SyncEvent{
 				client: c,
 				raw:    env.Payload,
@@ -832,8 +833,6 @@ func (c *Client) readPump() {
 			if err := json.Unmarshal(env.Payload, &p); err != nil {
 				continue
 			}
-			// Validate: exactly 64 lowercase hex chars.
-			// Invalid strings are dropped here — never reach handleFileVerifyCommand.
 			if len(p.FileVerify) != 64 {
 				continue
 			}
@@ -845,6 +844,15 @@ func (c *Client) readPump() {
 				}
 			}
 			if !valid {
+				continue
+			}
+			now := time.Now()
+			if now.Sub(lastFileVerify) > time.Second {
+				lastFileVerify = now
+				fileVerifyCount = 0
+			}
+			fileVerifyCount++
+			if fileVerifyCount > 3 {
 				continue
 			}
 			c.hub.events <- &FileVerifyEvent{client: c, hex: p.FileVerify}
