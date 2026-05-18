@@ -72,7 +72,8 @@
       <p class="lobby-hint">Once everyone is here, pick a file and start watching.</p>
 
       <!-- Fingerprint feedback — shown above the button, hidden until a file is chosen -->
-      <div id="fileVerify-spinner" class="fileVerify-pending" hidden>
+      <!-- No fileVerify-pending class here — added dynamically by ui.js only when showing -->
+      <div id="fileVerify-spinner" hidden>
         <span class="spinner" aria-hidden="true"></span>
         <span>Checking your file…</span>
       </div>

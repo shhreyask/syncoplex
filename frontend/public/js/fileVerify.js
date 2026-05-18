@@ -47,6 +47,7 @@ const computeAndSendFingerprint = (file) => {
 
     fileVerifyWorker.onerror = () => {
         clearTimeout(fileVerifyTimeout)
+        fileVerifyWorker.terminate()
         fileVerifyWorker = null
         roomState.fileVerdictError = 'Could not read your file. Try picking it again.'
         roomState.fileVerdict      = FILE_VERDICTS.PENDING

@@ -245,6 +245,7 @@ const renderFingerprintVerdict = () => {
 
   // Reset both indicators, then show only what's needed.
   fileVerifySpinner.hidden = true
+  fileVerifySpinner.classList.remove('fileVerify-pending')
   clearError(fileVerifyError)
 
   if (verdict === FILE_VERDICTS.MISMATCH) {
@@ -254,6 +255,7 @@ const renderFingerprintVerdict = () => {
     if (error) {
       showError(fileVerifyError, error)
     } else if (hasFile) {
+      fileVerifySpinner.classList.add('fileVerify-pending')
       fileVerifySpinner.hidden = false
     }
   }
