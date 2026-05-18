@@ -8,7 +8,14 @@
 //   Landing → Create/Join → Lobby (no connection yet)
 //   User enters name → clicks Set Name → WebSocket connects
 //   wsStatus === 'connected' → Pick File & Watch button appears
-//   user picks file → player:ready → showView('watch')
+//   user picks file → fileVerify computed → server verdict arrives
+//   verdict === 'valid' → showView('watch')   ← ONLY path to watch
+//   verdict === 'mismatch' → red error above button, re-pick on click
+//
+// Note: player:ready no longer triggers showView('watch'). The
+// fileVerify verdict is the sole gate. player:ready always fires
+// before the verdict (~200ms earlier), so the video is guaranteed
+// ready by the time the transition happens.
 
 // ── Element References ───────────────────────────────────────────
 
@@ -21,17 +28,18 @@ const btnJoin       = $('btn-join')
 const landingError  = $('landing-error')
 
 // Lobby
-const lobbyRoomCode     = $('lobby-room-code')
-const btnCopyCode       = $('btn-copy-code')
-const inputName         = $('input-name')
-const btnSetName        = $('btn-set-name')
-const lobbyError        = $('lobby-error')
-const wsStatusDot       = $('ws-status-indicator')
-const wsStatusLabel     = $('ws-status-label')
-const membersList       = $('members-list')
-const btnLeaveLobby     = $('btn-leave-lobby')
-const btnPickFile       = $('btn-pick-file')
-
+const lobbyRoomCode      = $('lobby-room-code')
+const btnCopyCode        = $('btn-copy-code')
+const inputName          = $('input-name')
+const btnSetName         = $('btn-set-name')
+const lobbyError         = $('lobby-error')
+const wsStatusDot        = $('ws-status-indicator')
+const wsStatusLabel      = $('ws-status-label')
+const membersList        = $('members-list')
+const btnLeaveLobby      = $('btn-leave-lobby')
+const btnPickFile        = $('btn-pick-file')
+const fileVerifySpinner = $('fileVerify-spinner')
+const fileVerifyError   = $('fileVerify-error')
 
 // Reconnect pill (injected into body)
 const reconnectPill = (() => {
@@ -163,7 +171,10 @@ btnLeaveLobby.addEventListener('click', () => {
   showView('landing')
 })
 
-// "Pick File & Watch" — only visible when connected, calls player directly
+// "Pick File & Watch" — visible only when connected.
+// On mismatch the button stays visible and re-opens the picker so the
+// user can select a different file. On valid the verdict handler below
+// auto-transitions — the user never needs to click again.
 btnPickFile.addEventListener('click', () => player.openPicker())
 
 // ── Member List Renderer ─────────────────────────────────────────
@@ -216,6 +227,68 @@ const renderWsStatus = () => {
     btnPickFile.hidden = true
   }
 }
+
+// ── Fingerprint Verdict Renderer ─────────────────────────────────
+//
+// Drives the small feedback area above the Pick File & Watch button.
+//
+//   pending, no file yet  → everything hidden (initial state)
+//   pending, computing    → spinner visible
+//   pending, error        → error text visible (timeout / Worker crash)
+//   valid                 → all hidden — auto-transition fires below
+//   mismatch              → red error text above button
+
+const renderFingerprintVerdict = () => {
+  const verdict = roomState.fileVerdict
+  const error   = roomState.fileVerdictError
+  const hasFile = roomState.fileHash !== null
+
+  // Reset both indicators, then show only what's needed.
+  fileVerifySpinner.hidden = true
+  fileVerifySpinner.classList.remove('fileVerify-pending')
+  clearError(fileVerifyError)
+
+  if (verdict === FILE_VERDICTS.MISMATCH) {
+    showError(fileVerifyError, "This file doesn't match the room. Choose the correct version.")
+
+  } else if (verdict === FILE_VERDICTS.PENDING) {
+    if (error) {
+      showError(fileVerifyError, error)
+    } else if (hasFile) {
+      fileVerifySpinner.classList.add('fileVerify-pending')
+      fileVerifySpinner.hidden = false
+    }
+  }
+  // VALID — nothing shown; auto-transition has already fired.
+}
+
+// ── Auto-transition on valid verdict ─────────────────────────────
+//
+// This is the ONLY place showView('watch') is called for the normal
+// lobby → watch flow. By the time this fires:
+//   - fileVerifyValid is true on the server (set before verdict is sent)
+//   - player:ready has already fired (video is ready — it fires ~200ms earlier)
+// So the user enters watch view with play immediately available.
+
+let pendingWatchTransition = false
+
+const tryEnterWatch = () => {
+  const ready = roomState.fileState !== FILE_STATES.WAITING &&
+                roomState.fileState !== FILE_STATES.HASHING
+  if (roomState.fileVerdict === FILE_VERDICTS.VALID && ready) {
+    showView('watch')
+    render()
+    pendingWatchTransition = false
+  } else {
+    pendingWatchTransition = true
+  }
+}
+
+document.addEventListener('fileVerify:verdict', (e) => {
+  if (e.detail.verdict === FILE_VERDICTS.VALID) {
+    tryEnterWatch()
+  }
+})
 
 // ── Watch View Renderer ──────────────────────────────────────────
 //
@@ -290,12 +363,22 @@ document.addEventListener('keydown', (e) => {
 // ── player:ready ─────────────────────────────────────────────────
 //
 // Fired by player.js when oncanplay fires for the first time.
-// This is the only place showView('watch') is called from player context.
+//
+// IMPORTANT: this no longer calls showView('watch'). The transition
+// is owned exclusively by the fileVerify:verdict handler above.
+// This prevents the race where the user enters watch view before
+// fileVerifyValid is true on the server, causing sync_commands to
+// be silently dropped.
+//
+// render() is still called here to handle the re-pick-in-watch-view
+// case — if a file is loaded while already in watch view, the overlay
+// needs to update immediately.
 
 document.addEventListener('player:ready', () => {
-  showView('watch')
-  render()  // force renderWatch() now that the view has switched
+  if (pendingWatchTransition) tryEnterWatch()
+  render()
 })
+
 // ── Main Render ──────────────────────────────────────────────────
 
 const render = () => {
@@ -303,6 +386,7 @@ const render = () => {
   if (view === 'lobby') {
     renderWsStatus()
     renderMembers()
+    renderFingerprintVerdict()
   }
   if (view === 'watch') {
     renderWatch()

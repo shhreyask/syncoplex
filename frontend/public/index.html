@@ -71,6 +71,15 @@
 
       <p class="lobby-hint">Once everyone is here, pick a file and start watching.</p>
 
+      <!-- Fingerprint feedback — shown above the button, hidden until a file is chosen -->
+      <!-- No fileVerify-pending class here — added dynamically by ui.js only when showing -->
+      <div id="fileVerify-spinner" hidden>
+        <span class="spinner" aria-hidden="true"></span>
+        <span>Checking your file…</span>
+      </div>
+      <p id="fileVerify-error" class="inline-error" hidden></p>
+
+      <!-- Appears only when connected — same as original Pick File & Watch -->
       <button id="btn-pick-file" class="btn btn-primary" hidden>Pick File &amp; Watch</button>
 
       <button id="btn-leave-lobby" class="btn btn-ghost">← Leave</button>
@@ -108,11 +117,13 @@
 
   </section>
 
-  <!-- JS — concatenation order matters -->
+  <!-- JS — order matters: state → ws → player → sync → fileVerify → ui -->
+  <!-- workerFileVerify.js is NOT listed here — loaded only via new Worker() -->
   <script src="/js/state.js"></script>
   <script src="/js/ws.js"></script>
   <script src="/js/player.js"></script>
   <script src="/js/sync.js"></script>
+  <script src="/js/fileVerify.js"></script>
   <script src="/js/ui.js"></script>
 </body>
 </html>

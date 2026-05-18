@@ -94,6 +94,14 @@ const connect = (roomCode, name) => {
     reconnectAttempt = 0
     setWsStatus('connected')
     sendJoin(name)
+
+    // Re-send a pending fileVerify hash on connect/reconnect.
+    // Covers two cases:
+    //   1. File was picked before the WebSocket handshake completed.
+    //   2. User is reconnecting — new Client on server has fileVerifyValid = false.
+    if (roomState.fileHash && roomState.fileVerdict === FILE_VERDICTS.PENDING) {
+      wsSend('file_fileVerify', { fileVerify: roomState.fileHash })
+    }
   }
 
   ws.onmessage = (event) => {
@@ -109,11 +117,21 @@ const connect = (roomCode, name) => {
     // Unknown types silently dropped
   }
 
-  ws.onclose = () => {
+    ws.onclose = () => {
     ws = null
     setWsStatus('disconnected')
+
+    // Cancel any in-flight server-verdict timeout — prevents a stale timeout
+    // from overwriting the verdict that arrives after reconnect re-validation.
+    cancelFingerprintTimeout()
+
+    // Reset verdict to PENDING so the onopen re-send logic fires on reconnect.
+    // fileHash is intentionally preserved — it is the re-send mechanism.
+    roomState.fileVerdict = FILE_VERDICTS.PENDING
+    notifyUpdate()
+
     if (!manualClose) scheduleReconnect(roomCode, name)
-}
+  }
 
   ws.onerror = () => {
     // onerror always fires before onclose — let onclose drive reconnect logic

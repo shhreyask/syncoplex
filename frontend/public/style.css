@@ -337,7 +337,7 @@ body[data-view="watch"]   #view-watch    { display: block; }
   border: none;
 }
 
-/* ── Lobby: Pick File button ─────────────────────────────────────── */
+/* ── Lobby: Pick File & Watch button ─────────────────────────────── */
 #btn-pick-file { width: 100%; }
 
 /* ── Subtitle Styling ────────────────────────────────────────────── */
@@ -349,4 +349,36 @@ body[data-view="watch"]   #view-watch    { display: block; }
      1px -1px 0 #000,
     -1px  1px 0 #000,
      1px  1px 0 #000;
+}
+
+/* ── Fingerprint Pending Indicator ───────────────────────────────── */
+/*
+ * Only two things to show above the Pick File & Watch button:
+ *   1. A spinner row while hashing / waiting for server verdict
+ *   2. A red error line on mismatch, timeout, or Worker crash
+ *      (reuses .inline-error — no extra rule needed)
+ */
+
+.fileVerify-pending {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-size: 0.85rem;
+  color: var(--text-dim);
+}
+
+/* Spinner — pure CSS ring, no image dependency */
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.spinner {
+  display: inline-block;
+  width: 13px;
+  height: 13px;
+  border: 2px solid var(--border);
+  border-top-color: var(--text-dim);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  flex-shrink: 0;
 }
