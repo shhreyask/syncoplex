@@ -24,6 +24,7 @@ func main() {
 	// ── Rate Limiters ─────────────────────────────────────────────────────────
 	roomCreateLimiter := newRateLimiter(RateRoomCreate, time.Minute)
 	roomLookupLimiter := newRateLimiter(RateRoomLookup, time.Minute)
+	turnLimiter       := newRateLimiter(RateTurnCredentials, time.Minute)
 
 	wrap := func(handler http.Handler, limiter *rateLimiter) http.Handler {
 		return securityHeaders(cors(cfg.AllowedOrigin)(limiter.middleware(handler)))
@@ -60,6 +61,7 @@ func main() {
 
 	mux.Handle("/rooms", wrap(handleCreateRoom(rdb), roomCreateLimiter))
 	mux.Handle("/rooms/", wrap(handleGetRoom(rdb, hub), roomLookupLimiter))
+	mux.Handle("/api/turn-credentials", wrap(http.HandlerFunc(handleTurnCredentials(cfg)), turnLimiter))
 	mux.Handle("/ws/", securityHeaders(cors(cfg.AllowedOrigin)(
 		http.HandlerFunc(handleWebSocket(hub, rdb, upgrader)),
 	)))
