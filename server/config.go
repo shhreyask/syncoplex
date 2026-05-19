@@ -39,7 +39,6 @@ func LoadConfig() Config {
 		RedisAddr:         getEnv("REDIS_ADDR", "127.0.0.1:6379"),
 		RedisPassword:     getEnv("REDIS_PASSWORD", ""),
 		AllowedOrigin:     getEnv("ALLOWED_ORIGIN", "https://syncoplex.app"),
-		MeteredStunURL:    getEnv("METERED_STUN_URL", ""),
 		MeteredTurnHost:   getEnv("METERED_TURN_HOST", ""),
 		MeteredUsername:    getEnv("METERED_USERNAME", ""),
 		MeteredCredential: getEnv("METERED_CREDENTIAL", ""),
