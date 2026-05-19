@@ -135,7 +135,6 @@ Script loading order in `index.html`:
 ## Environment Config
 
 ```
-METERED_STUN_URL      stun:yoursubdomain.metered.live:80
 METERED_TURN_HOST     yoursubdomain.metered.live
 METERED_USERNAME      <from Metered dashboard>
 METERED_CREDENTIAL    <from Metered dashboard>
@@ -1197,7 +1196,7 @@ Realistic floor for Indian userbase: ~35% of connections needing TURN even with 
 
 ### Step 6 — Server (verify before any client code)
 
-1. Sign up for Metered. Copy `METERED_STUN_URL`, `METERED_TURN_HOST`, `METERED_USERNAME`, `METERED_CREDENTIAL` into env config.
+1. Sign up for Metered. Copy METERED_TURN_HOST`, `METERED_USERNAME`, `METERED_CREDENTIAL` into env config.
 2. Add `webrtcSyncWindow time.Time` and `webrtcCount int` to `Client` struct.
 3. Add `WebRTCRelayEvent` and `execute()`.
 4. Implement `handleWebRTCRelay` — rate limit, room validation, self-send guard, `senderUserId` injection, targeted send.
