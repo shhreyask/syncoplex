@@ -13,7 +13,8 @@ func handleTurnCredentials(cfg Config) http.HandlerFunc {
 			return
 		}
 
-		if r.Header.Get("Origin") != cfg.AllowedOrigin {
+		origin := r.Header.Get("Origin")
+		if origin != "" && origin != cfg.AllowedOrigin {
 			http.Error(w, "Forbidden", http.StatusForbidden)
 			return
 		}
