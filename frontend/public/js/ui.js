@@ -165,6 +165,7 @@ btnCopyCode.addEventListener('click', () => {
 })
 
 btnLeaveLobby.addEventListener('click', () => {
+  webrtc.teardownAll()
   disconnect()
   resetRoomState()
   history.pushState({}, '', '/')
@@ -176,6 +177,42 @@ btnLeaveLobby.addEventListener('click', () => {
 // user can select a different file. On valid the verdict handler below
 // auto-transitions — the user never needs to click again.
 btnPickFile.addEventListener('click', () => player.openPicker())
+
+// ── WebRTC Wiring ────────────────────────────────────────────────
+//
+// These onMessage calls register additional handlers for message types
+// that ws.js already handles (addMember, removeMember). ws.js's
+// onMessage supports multiple handlers per type — both fire in order.
+
+let secondMemberNotified = false
+
+onMessage('user_joined', (payload) => {
+  webrtc.onMemberJoined({ userId: payload.userId, name: payload.name })
+
+  // Warm TURN cache when the second member appears in the room.
+  // members array does not include self, so length >= 1 means 2+ people.
+  if (!secondMemberNotified && roomState.members.length >= 1) {
+    secondMemberNotified = true
+    webrtc.onSecondMemberVisible()
+  }
+})
+
+onMessage('user_reconnected', (payload) => {
+  webrtc.onMemberReconnected({ userId: payload.userId, name: payload.name })
+})
+
+onMessage('user_left', (payload) => {
+  webrtc.onMemberLeft(payload.userId)
+})
+
+// Also check on room_state (initial snapshot) — if we join a room that
+// already has members, warm the TURN cache immediately.
+onMessage('room_state', () => {
+  if (!secondMemberNotified && roomState.members.length >= 1) {
+    secondMemberNotified = true
+    webrtc.onSecondMemberVisible()
+  }
+})
 
 // ── Member List Renderer ─────────────────────────────────────────
 
@@ -229,21 +266,12 @@ const renderWsStatus = () => {
 }
 
 // ── Fingerprint Verdict Renderer ─────────────────────────────────
-//
-// Drives the small feedback area above the Pick File & Watch button.
-//
-//   pending, no file yet  → everything hidden (initial state)
-//   pending, computing    → spinner visible
-//   pending, error        → error text visible (timeout / Worker crash)
-//   valid                 → all hidden — auto-transition fires below
-//   mismatch              → red error text above button
 
 const renderFingerprintVerdict = () => {
   const verdict = roomState.fileVerdict
   const error   = roomState.fileVerdictError
   const hasFile = roomState.fileHash !== null
 
-  // Reset both indicators, then show only what's needed.
   fileVerifySpinner.hidden = true
   fileVerifySpinner.classList.remove('fileVerify-pending')
   clearError(fileVerifyError)
@@ -259,16 +287,9 @@ const renderFingerprintVerdict = () => {
       fileVerifySpinner.hidden = false
     }
   }
-  // VALID — nothing shown; auto-transition has already fired.
 }
 
 // ── Auto-transition on valid verdict ─────────────────────────────
-//
-// This is the ONLY place showView('watch') is called for the normal
-// lobby → watch flow. By the time this fires:
-//   - fileVerifyValid is true on the server (set before verdict is sent)
-//   - player:ready has already fired (video is ready — it fires ~200ms earlier)
-// So the user enters watch view with play immediately available.
 
 let pendingWatchTransition = false
 
@@ -291,35 +312,23 @@ document.addEventListener('fileVerify:verdict', (e) => {
 })
 
 // ── Watch View Renderer ──────────────────────────────────────────
-//
-// Called on every room:updated while in watch view.
-// Manages overlay visibility, controls visibility, play/pause icon.
-// Never touches video.currentTime — that belongs to player.js.
 
 const renderWatch = () => {
-  // Play/pause icon
   btnPlayPause.textContent = video.paused ? '▶' : '⏸'
 
   const ready = roomState.fileState !== FILE_STATES.WAITING &&
                 roomState.fileState !== FILE_STATES.HASHING
 
-  // Overlay: visible until file is ready
   filePickerOverlay.classList.toggle('hidden', ready)
 
-  // Controls: hidden until ready; always visible while paused
   if (!ready) {
     controlsBar.classList.add('hidden')
   } else if (video.paused) {
     controlsBar.classList.remove('hidden')
   }
-  // When playing and ready, the hide timer manages visibility
 }
 
 // ── Controls Auto-Hide ───────────────────────────────────────────
-//
-// opacity + pointer-events, never display:none — no layout thrash.
-// Never hides while paused — checked before setting the timer.
-// touchstart included because mousemove doesn't fire on touchscreens.
 
 let hideTimer
 let controlsVisible = true
@@ -343,11 +352,6 @@ document.addEventListener('mousemove',  resetHideTimer)
 document.addEventListener('touchstart', resetHideTimer, { passive: true })
 
 // ── Keyboard Shortcuts ───────────────────────────────────────────
-//
-// All playback actions go through player.js — never touch
-// video.currentTime directly here. That would bypass the
-// readyState guard and dispatchPlayerAction, silently desyncing
-// arrow key seeks in step 4.
 
 document.addEventListener('keydown', (e) => {
   if (document.body.dataset.view !== 'watch') return
@@ -361,18 +365,6 @@ document.addEventListener('keydown', (e) => {
 })
 
 // ── player:ready ─────────────────────────────────────────────────
-//
-// Fired by player.js when oncanplay fires for the first time.
-//
-// IMPORTANT: this no longer calls showView('watch'). The transition
-// is owned exclusively by the fileVerify:verdict handler above.
-// This prevents the race where the user enters watch view before
-// fileVerifyValid is true on the server, causing sync_commands to
-// be silently dropped.
-//
-// render() is still called here to handle the re-pick-in-watch-view
-// case — if a file is loaded while already in watch view, the overlay
-// needs to update immediately.
 
 document.addEventListener('player:ready', () => {
   if (pendingWatchTransition) tryEnterWatch()
