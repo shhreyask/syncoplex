@@ -207,7 +207,7 @@ body[data-view="watch"]   #view-watch    { display: flex; }
   width: 120px;
   height: 68px;
   background: #111;
-  border-radius: 4px;
+  border-radius: var(--radius);
   overflow: hidden;
   flex-shrink: 0;
   position: relative;
@@ -235,18 +235,85 @@ body[data-view="watch"]   #view-watch    { display: flex; }
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 108px;
+  z-index: 1;
 }
 
 .tile-cam-off video { display: none; }
 
 .tile-cam-off::after {
-  content: '🚫';
+  content: '';
   position: absolute;
   inset: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 1.2rem;
+  background: #111;
+}
+
+/* ── WebRTC Controls Overlay (right edge of window) ──────────────
+ *
+ * Vertical strip pinned to the right edge of #view-watch.
+ * Shown/hidden by the same JS auto-hide timer as #controls-bar.
+ */
+
+#webrtc-controls {
+  position: absolute;
+  top: 50%;
+  right: 0;
+  transform: translateY(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 6px;
+  background: rgba(0, 0, 0, 0.7);
+  border-radius: var(--radius) 0 0 var(--radius);
+  opacity: 1;
+  pointer-events: auto;
+  transition: opacity 0.3s;
+  z-index: 30;
+}
+
+#webrtc-controls.hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.wc-btn {
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  font-size: 1rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  transition: background 0.15s;
+}
+
+.wc-btn:hover {
+  background: rgba(255, 255, 255, 0.25);
+}
+
+.wc-btn-off {
+  background: rgba(255, 77, 77, 0.4);
+}
+
+.wc-btn-off:hover {
+  background: rgba(255, 77, 77, 0.6);
+}
+
+.wc-btn-leave {
+  background: rgba(255, 77, 77, 0.5);
+  margin-top: 4px;
+}
+
+.wc-btn-leave:hover {
+  background: rgba(255, 77, 77, 0.8);
 }
 
 /* ── Movie Container ─────────────────────────────────────────────── */
@@ -419,6 +486,7 @@ body[data-view="watch"]   #view-watch    { display: flex; }
 }
 
 /* ── Fingerprint Pending Indicator ───────────────────────────────── */
+
 .fileVerify-pending {
   display: flex;
   align-items: center;

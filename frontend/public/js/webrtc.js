@@ -5,6 +5,8 @@
 // Never touches <video#main-video> — movie audio cannot enter WebRTC.
 //
 // Public API (called by ui.js):
+//   webrtc.requestPermissions()
+//   webrtc.connectToExistingMembers(members)
 //   webrtc.onMemberJoined(member)
 //   webrtc.onMemberReconnected(member)
 //   webrtc.onMemberLeft(userId)
@@ -13,11 +15,19 @@
 
 // === CONFIGURATION ===
 
-const WEBRTC_BITRATE_CAP     = 150_000  // 150 Kbps — tiles are 120×68px
-const WEBRTC_ICE_POOL_SIZE   = 4        // pre-gather candidates before offer
-const WEBRTC_RECONNECT_GRACE = 2500     // ms — wait before ICE restart
-const WEBRTC_BACKSTOP_MS     = 30000    // ms — max time in 'disconnected'
-const WEBRTC_MAX_PENDING     = 50       // ICE candidate buffer cap per peer
+const WEBRTC_BITRATE_CAP     = 150_000
+const WEBRTC_ICE_POOL_SIZE   = 4
+const WEBRTC_RECONNECT_GRACE = 2500
+const WEBRTC_BACKSTOP_MS     = 30000
+const WEBRTC_MAX_PENDING     = 50
+
+// === STATE ===
+
+// webrtcReady gates outbound signaling. Set to true after
+// requestPermissions() resolves. Inbound offers (webrtc_offer)
+// are always handled — so we can answer someone who's already
+// in watch view while we're still joining.
+let webrtcReady = false
 
 // === TURN CREDENTIALS (1-hour client-side cache) ===
 
@@ -40,9 +50,11 @@ const getTurnCredentials = async () => {
 
 let localStream        = null
 let localStreamPromise = null
+let permissionDenied   = false
 
 const getLocalStream = async () => {
   if (localStream) return localStream
+  if (permissionDenied) return null
 
   if (!localStreamPromise) {
     localStreamPromise = navigator.mediaDevices.getUserMedia({
@@ -55,10 +67,12 @@ const getLocalStream = async () => {
     })
     .then(stream => {
       localStream = stream
+      permissionDenied = false
       return stream
     })
     .catch(() => {
-      localStreamPromise = null  // allow retry on next join
+      localStreamPromise = null
+      permissionDenied = true
       return null
     })
   }
@@ -100,7 +114,6 @@ const createPeerConnection = async (remoteUserId, iceServers) => {
 
   pc.onicecandidate = ({ candidate }) => {
     if (!candidate) return
-    // All candidates sent — IPv4 and IPv6 both. No filtering.
     wsSend('ice_candidate', { targetUserId: remoteUserId, candidate })
   }
 
@@ -152,13 +165,16 @@ const closePeerConnection = (userId) => {
 
 const _onMemberJoined = async (member) => {
   if (member.userId === roomState.myUserId) return
+  // Don't initiate outbound offers until we're in watch view
+  // with permissions settled. Inbound offers are always answered.
+  if (!webrtcReady) return
 
   const [stream, iceServers] = await Promise.all([
     getLocalStream(),
     getTurnCredentials(),
   ])
 
-  if (stream && !tilesContainer.querySelector('.tile-self')) {
+  if (!tilesContainer.querySelector('.tile-self')) {
     createLocalTile(stream)
   }
 
@@ -173,23 +189,24 @@ const createOffer = async (remoteUserId, iceServers) => {
     targetUserId: remoteUserId,
     payload: pc.localDescription,
   })
-  // capVideoBitrate NOT called here — remote description not set yet.
 }
 
+// Inbound offers are ALWAYS handled — even before webrtcReady.
+// This lets us answer offers from users already in watch view
+// while we're still joining.
 onMessage('webrtc_offer', async ({ senderUserId, payload: offer }) => {
   const [stream, iceServers] = await Promise.all([
     getLocalStream(),
     getTurnCredentials(),
   ])
 
-  if (stream && !tilesContainer.querySelector('.tile-self')) {
+  if (!tilesContainer.querySelector('.tile-self')) {
     createLocalTile(stream)
   }
 
   const existingPc = peerConnections[senderUserId]
 
   if (existingPc && existingPc.connectionState !== 'failed') {
-    // ICE restart — reuse existing PC.
     await existingPc.setRemoteDescription(new RTCSessionDescription(offer))
     drainPendingCandidates(senderUserId, existingPc)
     const answer = await existingPc.createAnswer()
@@ -201,7 +218,6 @@ onMessage('webrtc_offer', async ({ senderUserId, payload: offer }) => {
     })
 
   } else {
-    // Fresh offer — new PC.
     if (existingPc) closePeerConnection(senderUserId)
     const pc = await createPeerConnection(senderUserId, iceServers)
     await pc.setRemoteDescription(new RTCSessionDescription(offer))
@@ -209,10 +225,7 @@ onMessage('webrtc_offer', async ({ senderUserId, payload: offer }) => {
     const answer = await pc.createAnswer()
     await pc.setLocalDescription(answer)
     await capVideoBitrate(pc)
-    wsSend('webrtc_answer', {
-      targetUserId: senderUserId,
-      payload: pc.localDescription,
-    })
+    wsSend('webrtc_answer', { targetUserId: senderUserId, payload: pc.localDescription })
   }
 })
 
@@ -248,18 +261,15 @@ const drainPendingCandidates = async (userId, pc) => {
 // === RECONNECT — TIERED LOGIC WITH 2.5s GRACE ===
 
 const _onMemberReconnected = async (member) => {
+  if (!webrtcReady) return
+
   const existing = peerConnections[member.userId]
 
   if (existing && existing.connectionState === 'disconnected') {
-    // Grace period — wait 2.5s before sending ICE restart offer.
     await new Promise(resolve => setTimeout(resolve, WEBRTC_RECONNECT_GRACE))
 
-    if (existing.connectionState === 'connected') {
-      return  // self-recovered
-    }
-    if (existing.connectionState !== 'disconnected') {
-      return  // moved to 'failed' — that handler took over
-    }
+    if (existing.connectionState === 'connected') return
+    if (existing.connectionState !== 'disconnected') return
 
     clearTimeout(reconnectTimers[member.userId])
     delete reconnectTimers[member.userId]
@@ -273,9 +283,7 @@ const _onMemberReconnected = async (member) => {
     })
 
   } else {
-    // PC gone — full re-offer.
     if (existing) closePeerConnection(member.userId)
-
     const [, iceServers] = await Promise.all([
       getLocalStream(),
       getTurnCredentials(),
@@ -294,10 +302,15 @@ const createLocalTile = (stream) => {
   tile.dataset.userId = roomState.myUserId
 
   const video         = document.createElement('video')
-  video.srcObject     = stream
   video.autoplay      = true
-  video.muted         = true       // always muted — prevents feedback
+  video.muted         = true
   video.playsInline   = true
+
+  if (stream) {
+    video.srcObject = stream
+  } else {
+    tile.classList.add('tile-cam-off')
+  }
 
   const label         = document.createElement('span')
   label.className     = 'tile-label'
@@ -326,7 +339,38 @@ const attachRemoteTile = (userId, stream) => {
     tile.append(video, label)
     tilesContainer.append(tile)
   }
-  tile.querySelector('video').srcObject = stream
+
+  const videoEl = tile.querySelector('video')
+  videoEl.srcObject = stream
+
+  const hasVideo = stream && stream.getVideoTracks().length > 0 &&
+                   stream.getVideoTracks().some(t => t.enabled)
+  tile.classList.toggle('tile-cam-off', !hasVideo)
+
+  if (stream) {
+    stream.getVideoTracks().forEach(track => {
+      track.onmute   = () => tile.classList.add('tile-cam-off')
+      track.onunmute = () => tile.classList.remove('tile-cam-off')
+    })
+  }
+}
+
+const ensureRemoteTile = (userId, name) => {
+  if (tilesContainer.querySelector(`[data-user-id="${userId}"]`)) return
+  const tile          = document.createElement('div')
+  tile.className      = 'tile tile-cam-off'
+  tile.dataset.userId = userId
+
+  const video         = document.createElement('video')
+  video.autoplay      = true
+  video.playsInline   = true
+
+  const label         = document.createElement('span')
+  label.className     = 'tile-label'
+  label.textContent   = name || userId
+
+  tile.append(video, label)
+  tilesContainer.append(tile)
 }
 
 const removeTile = (userId) => {
@@ -334,9 +378,93 @@ const removeTile = (userId) => {
   if (tile) tile.remove()
 }
 
+// === MEDIA CONTROLS OVERLAY (right edge of window) ===
+
+const controlsOverlay = (() => {
+  const panel = document.createElement('div')
+  panel.id = 'webrtc-controls'
+  panel.addEventListener('click',       (e) => e.stopPropagation())
+  panel.addEventListener('mousedown',   (e) => e.stopPropagation())
+  panel.addEventListener('pointerdown', (e) => e.stopPropagation())
+
+  const btnMic = document.createElement('button')
+  btnMic.className = 'wc-btn'
+  btnMic.textContent = '🎤'
+  btnMic.title = 'Toggle microphone'
+  btnMic.addEventListener('click', (e) => {
+    e.stopPropagation()
+    if (!localStream) return
+    const track = localStream.getAudioTracks()[0]
+    if (!track) return
+    track.enabled = !track.enabled
+    btnMic.textContent = track.enabled ? '🎤' : '🔇'
+    btnMic.classList.toggle('wc-btn-off', !track.enabled)
+  })
+
+  const btnVid = document.createElement('button')
+  btnVid.className = 'wc-btn'
+  btnVid.textContent = '📹'
+  btnVid.title = 'Toggle camera'
+  btnVid.addEventListener('click', (e) => {
+    e.stopPropagation()
+    if (!localStream) return
+    const track = localStream.getVideoTracks()[0]
+    if (!track) return
+    track.enabled = !track.enabled
+    btnVid.textContent = track.enabled ? '📹' : '🚫'
+    btnVid.classList.toggle('wc-btn-off', !track.enabled)
+    const selfTile = tilesContainer.querySelector('.tile-self')
+    if (selfTile) selfTile.classList.toggle('tile-cam-off', !track.enabled)
+  })
+
+  const btnLeave = document.createElement('button')
+  btnLeave.className = 'wc-btn wc-btn-leave'
+  btnLeave.textContent = '✕'
+  btnLeave.title = 'Leave room'
+  btnLeave.addEventListener('click', (e) => {
+    e.stopPropagation()
+    webrtc.teardownAll()
+    disconnect()
+    resetRoomState()
+    history.pushState({}, '', '/')
+    showView('landing')
+  })
+
+  panel.append(btnMic, btnVid, btnLeave)
+  document.getElementById('view-watch').appendChild(panel)
+  return panel
+})()
+
 // === PUBLIC API ===
 
 const webrtc = {
+
+  requestPermissions: async () => {
+    await getLocalStream()
+    webrtcReady = true
+  },
+
+  // Called by ui.js after entering watch view.
+  // Sends offers to everyone already in the room.
+  connectToExistingMembers: async (members) => {
+    if (!webrtcReady) return
+
+    const [stream, iceServers] = await Promise.all([
+      getLocalStream(),
+      getTurnCredentials(),
+    ])
+
+    if (!tilesContainer.querySelector('.tile-self')) {
+      createLocalTile(stream)
+    }
+
+    for (const member of members) {
+      if (member.userId === roomState.myUserId) continue
+      if (peerConnections[member.userId]) continue  // already connected
+      ensureRemoteTile(member.userId, member.name)
+      await createOffer(member.userId, iceServers)
+    }
+  },
 
   onSecondMemberVisible: () => {
     getTurnCredentials().catch(() => {})
@@ -344,6 +472,7 @@ const webrtc = {
 
   onMemberJoined: async (member) => {
     if (member.userId === roomState.myUserId) return
+    ensureRemoteTile(member.userId, member.name)
     await _onMemberJoined(member)
   },
 
@@ -366,6 +495,8 @@ const webrtc = {
       localStream        = null
       localStreamPromise = null
     }
+    permissionDenied = false
+    webrtcReady      = false
     tilesContainer.innerHTML = ''
     turnCredentials          = null
     turnCredentialsExpiresAt = 0

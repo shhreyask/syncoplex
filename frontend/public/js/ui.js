@@ -9,13 +9,8 @@
 //   User enters name → clicks Set Name → WebSocket connects
 //   wsStatus === 'connected' → Pick File & Watch button appears
 //   user picks file → fileVerify computed → server verdict arrives
-//   verdict === 'valid' → showView('watch')   ← ONLY path to watch
+//   verdict === 'valid' → camera/mic permission prompted → showView('watch')
 //   verdict === 'mismatch' → red error above button, re-pick on click
-//
-// Note: player:ready no longer triggers showView('watch'). The
-// fileVerify verdict is the sole gate. player:ready always fires
-// before the verdict (~200ms earlier), so the video is guaranteed
-// ready by the time the transition happens.
 
 // ── Element References ───────────────────────────────────────────
 
@@ -173,9 +168,8 @@ btnLeaveLobby.addEventListener('click', () => {
 })
 
 // "Pick File & Watch" — visible only when connected.
-// On mismatch the button stays visible and re-opens the picker so the
-// user can select a different file. On valid the verdict handler below
-// auto-transitions — the user never needs to click again.
+// No permission prompt here — permissions are asked after the file
+// verdict comes back valid, right before entering watch view.
 btnPickFile.addEventListener('click', () => player.openPicker())
 
 // ── WebRTC Wiring ────────────────────────────────────────────────
@@ -290,16 +284,24 @@ const renderFingerprintVerdict = () => {
 }
 
 // ── Auto-transition on valid verdict ─────────────────────────────
+//
+// When the file verdict is valid, ask for camera/mic permissions
+// BEFORE transitioning to watch view. If denied, the user still
+// enters watch — they just get a black tile.
 
 let pendingWatchTransition = false
 
-const tryEnterWatch = () => {
+const tryEnterWatch = async () => {
   const ready = roomState.fileState !== FILE_STATES.WAITING &&
                 roomState.fileState !== FILE_STATES.HASHING
   if (roomState.fileVerdict === FILE_VERDICTS.VALID && ready) {
+    await webrtc.requestPermissions()
     showView('watch')
     render()
     pendingWatchTransition = false
+    // Now that we're in watch view with permissions settled,
+    // connect to everyone already in the room.
+    webrtc.connectToExistingMembers(roomState.members)
   } else {
     pendingWatchTransition = true
   }
@@ -335,14 +337,17 @@ let controlsVisible = true
 
 const resetHideTimer = () => {
   if (document.body.dataset.view !== 'watch') return
+  const webrtcControls = document.getElementById('webrtc-controls')
   if (!controlsVisible) {
     controlsBar.classList.remove('hidden')
+    if (webrtcControls) webrtcControls.classList.remove('hidden')
     controlsVisible = true
   }
   clearTimeout(hideTimer)
   hideTimer = setTimeout(() => {
     if (!video.paused) {
       controlsBar.classList.add('hidden')
+      if (webrtcControls) webrtcControls.classList.add('hidden')
       controlsVisible = false
     }
   }, 3000)
