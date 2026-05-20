@@ -19,12 +19,6 @@ const WEBRTC_RECONNECT_GRACE = 2500     // ms — wait before ICE restart
 const WEBRTC_BACKSTOP_MS     = 30000    // ms — max time in 'disconnected'
 const WEBRTC_MAX_PENDING     = 50       // ICE candidate buffer cap per peer
 
-const WEBRTC_STUN_SERVERS = [
-  { urls: 'stun:stun.l.google.com:19302' },
-  { urls: 'stun:stun1.l.google.com:19302' },
-  { urls: 'stun:stun.cloudflare.com:3478' },
-]
-
 // === TURN CREDENTIALS (1-hour client-side cache) ===
 
 let turnCredentials          = null

@@ -10,7 +10,7 @@ const (
 	MaxRoomMembers             = 6
 	RoomTTL                    = 6 * 60 * 60    // 6 hours in seconds
 	SessionTTL                 = 5 * 60         // 5 minutes in seconds
-	MaxMessageSize             = 4096           // 4KB
+	MaxMessageSize             = 16384           // 16KB
 	WriteWait                  = 10             // seconds — write deadline per message
 	PongWait                   = 60             // seconds — max silence before drop
 	SendBufferSize             = 256            // buffered send channel size per client

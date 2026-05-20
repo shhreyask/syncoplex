@@ -965,19 +965,33 @@ func (c *Client) readPump() {
 // ── Write Pump ───────────────────────────────────────────────────────────────
 
 func (c *Client) writePump() {
-	defer c.conn.Close()
+	pingTicker := time.NewTicker(((PongWait * time.Second) * 9) / 10) // ~54s
+	defer func() {
+		pingTicker.Stop()
+		c.conn.Close()
+	}()
 
-	for msg := range c.send {
-		c.conn.SetWriteDeadline(time.Now().Add(WriteWait * time.Second))
-		if err := c.conn.WriteMessage(websocket.TextMessage, msg); err != nil {
-			// Write failed — connection is dead. Loop exits, defer closes conn.
-			return
+	for {
+		select {
+		case msg, ok := <-c.send:
+			if !ok {
+				// Channel closed — send close frame.
+				c.conn.SetWriteDeadline(time.Now().Add(WriteWait * time.Second))
+				c.conn.WriteMessage(websocket.CloseMessage,
+					websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+				return
+			}
+			c.conn.SetWriteDeadline(time.Now().Add(WriteWait * time.Second))
+			if err := c.conn.WriteMessage(websocket.TextMessage, msg); err != nil {
+				return
+			}
+		case <-pingTicker.C:
+			c.conn.SetWriteDeadline(time.Now().Add(WriteWait * time.Second))
+			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				return
+			}
 		}
 	}
-
-	c.conn.SetWriteDeadline(time.Now().Add(WriteWait * time.Second))
-	c.conn.WriteMessage(websocket.CloseMessage,
-		websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
 }
 
 // ── Utility ──────────────────────────────────────────────────────────────────
