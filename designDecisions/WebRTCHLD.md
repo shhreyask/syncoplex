@@ -90,11 +90,13 @@ server/
 │                       Add handleMicState — broadcastToOthers with senderUserId
 │                       Add mic_state case to readPump switch
 └── turn.go             NEW — GET /api/turn-credentials handler
-                        Serves Metered STUN + TURN from env config
-                        All Metered transport variants (UDP, TCP, TLS/443)
-                        Same-origin check, JSON response with expiresAt
+                        Calls Metered REST API server-side for ephemeral creds (4hr TTL)
+                        Server-side cache (10 min) to avoid hammering Metered API
+                        API key never leaves server — clients get only ephemeral creds
+                        Base STUN servers (Google x2 + Cloudflare Mumbai)
+                        Cache-Control: no-store header
+                        Origin check (allows empty — ephemeral creds bound abuse)
                         Registered in main.go under existing rate limiter
-                        Upgrade path to self-hosted coturn in comments
 
 Step 7 — Client only:
 
@@ -163,9 +165,8 @@ Script loading order in `index.html`:
 ## Environment Config
 
 ```
-METERED_TURN_HOST     yoursubdomain.metered.live
-METERED_USERNAME      <from Metered dashboard>
-METERED_CREDENTIAL    <from Metered dashboard>
+METERED_TURN_HOST     syncoplex.metered.live
+METERED_API_KEY       <from Metered dashboard>
 ```
 
 **Upgrade path to self-hosted coturn:**
@@ -394,7 +395,7 @@ case "webrtc_offer", "webrtc_answer", "ice_candidate":
     if err := json.Unmarshal(env.Payload, &p); err != nil {
         continue
     }
-    if p.TargetUserId == "" {
+    if p.TargetUserId == "" || len(p.TargetUserId) > 64 {
         continue
     }
     c.hub.events <- &WebRTCRelayEvent{
@@ -1099,6 +1100,8 @@ const _onMemberReconnected = async (member) => {
     if (existing && existing.connectionState === 'disconnected') {
         await new Promise(resolve => setTimeout(resolve, 2500))
 
+        if (peerConnections[member.userId] !== existing) return
+
         if (existing.connectionState === 'connected') return
         if (existing.connectionState !== 'disconnected') return
 
@@ -1312,7 +1315,11 @@ const webrtc = {
     // Called after file verdict is valid, before entering watch view.
     // Prompts for camera/mic. Sets webrtcReady so signaling can begin.
     requestPermissions: async () => {
-        await getLocalStream()
+        try {
+            await getLocalStream()
+        } catch {
+            permissionDenied = true
+        }
         webrtcReady = true
     },
 
@@ -1643,6 +1650,7 @@ Realistic floor for Indian userbase: ~35% of connections needing TURN even with 
 | Controls overlay clicked | `stopPropagation` on click/mousedown/pointerdown — movie player unaffected |
 | Controls auto-hide | JS timer shared with controls bar — both fade after 3s, both show on mouse move |
 | Tile label hidden by cam-off overlay | `.tile-label { z-index: 1 }` — above `.tile-cam-off::after` |
+| No camera/mic device (NotFoundError) | `requestPermissions` catches all errors, sets `permissionDenied = true`, `webrtcReady` still true, user enters with black tile |
 
 ---
 
@@ -1681,7 +1689,7 @@ Realistic floor for Indian userbase: ~35% of connections needing TURN even with 
 13. Add all CSS — tiles, cam-off, tile-label z-index, tile-mic-off, #webrtc-controls, .wc-btn variants. Verify layout with placeholder divs before writing JS.
 14. Implement `webrtc.js` in section order:
     - `webrtcReady` flag, defaults `false`
-    - `getTurnCredentials` — 1-hour cache, 60s buffer
+    - `getTurnCredentials` — 10-minute cache (matches server cache TTL), 60s buffer
     - `getLocalStream` — promise-cached, 320×180@24fps, `permissionDenied` flag, reset on failure
     - `capVideoBitrate` — 150 Kbps, `.catch(() => {})`, called only after both SDP set
     - `addTracksToConnection`
