@@ -278,6 +278,8 @@ const _onMemberReconnected = async (member) => {
   if (existing && existing.connectionState === 'disconnected') {
     await new Promise(resolve => setTimeout(resolve, WEBRTC_RECONNECT_GRACE))
 
+    w.Header().Set("Cache-Control", "no-store")
+
     if (existing.connectionState === 'connected') return
     if (existing.connectionState !== 'disconnected') return
 
@@ -494,7 +496,12 @@ const webrtc = {
   // Called after file verdict is valid, before entering watch view.
   // Prompts for camera/mic. Sets webrtcReady so signaling can begin.
   requestPermissions: async () => {
-    await getLocalStream()
+    try {
+        await getLocalStream()
+    } catch {
+        // No camera, no mic, or any other error — user enters with black tile.
+        permissionDenied = true
+    }
     webrtcReady = true
   },
 
