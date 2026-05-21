@@ -278,7 +278,7 @@ const _onMemberReconnected = async (member) => {
   if (existing && existing.connectionState === 'disconnected') {
     await new Promise(resolve => setTimeout(resolve, WEBRTC_RECONNECT_GRACE))
 
-    w.Header().Set("Cache-Control", "no-store")
+    if (peerConnections[member.userId] !== existing) return
 
     if (existing.connectionState === 'connected') return
     if (existing.connectionState !== 'disconnected') return
