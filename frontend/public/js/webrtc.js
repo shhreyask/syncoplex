@@ -23,10 +23,10 @@ const WEBRTC_MAX_PENDING     = 50
 
 // === STATE ===
 
-// webrtcReady gates outbound signaling. Set to true after
-// requestPermissions() resolves. Inbound offers (webrtc_offer)
-// are always handled — so we can answer someone who's already
-// in watch view while we're still joining.
+// webrtcReady gates all signaling (outbound AND inbound).
+// Set to true after requestPermissions() resolves.
+// Before that, inbound offers are buffered in pendingOffers
+// and drained in connectToExistingMembers().
 let webrtcReady = false
 
 // === TURN CREDENTIALS (1-hour client-side cache) ===
@@ -96,8 +96,8 @@ const capVideoBitrate = async (pc) => {
 
 // === PEER CONNECTION MANAGEMENT ===
 
-const peerConnections = {}
-const reconnectTimers = {}
+const peerConnections   = {}
+const reconnectTimers   = {}
 const pendingCandidates = {}
 
 const addTracksToConnection = (pc) => {
@@ -163,10 +163,12 @@ const closePeerConnection = (userId) => {
 
 // === SIGNALING — OFFER / ANSWER ===
 
+// Buffer inbound offers received before webrtcReady.
+// Drained when connectToExistingMembers runs.
+const pendingOffers = {}
+
 const _onMemberJoined = async (member) => {
   if (member.userId === roomState.myUserId) return
-  // Don't initiate outbound offers until we're in watch view
-  // with permissions settled. Inbound offers are always answered.
   if (!webrtcReady) return
 
   const [stream, iceServers] = await Promise.all([
@@ -178,6 +180,8 @@ const _onMemberJoined = async (member) => {
     createLocalTile(stream)
   }
 
+  // No ensureRemoteTile here — tile appears only when the remote
+  // user enters watch view, answers our offer, and ontrack fires.
   await createOffer(member.userId, iceServers)
 }
 
@@ -191,10 +195,7 @@ const createOffer = async (remoteUserId, iceServers) => {
   })
 }
 
-// Inbound offers are ALWAYS handled — even before webrtcReady.
-// This lets us answer offers from users already in watch view
-// while we're still joining.
-onMessage('webrtc_offer', async ({ senderUserId, payload: offer }) => {
+const handleInboundOffer = async (senderUserId, offer) => {
   const [stream, iceServers] = await Promise.all([
     getLocalStream(),
     getTurnCredentials(),
@@ -227,6 +228,15 @@ onMessage('webrtc_offer', async ({ senderUserId, payload: offer }) => {
     await capVideoBitrate(pc)
     wsSend('webrtc_answer', { targetUserId: senderUserId, payload: pc.localDescription })
   }
+}
+
+onMessage('webrtc_offer', async ({ senderUserId, payload: offer }) => {
+  if (!webrtcReady) {
+    // Buffer — will be processed in connectToExistingMembers
+    pendingOffers[senderUserId] = offer
+    return
+  }
+  await handleInboundOffer(senderUserId, offer)
 })
 
 onMessage('webrtc_answer', async ({ senderUserId, payload: answer }) => {
@@ -352,6 +362,9 @@ const attachRemoteTile = (userId, stream) => {
       track.onmute   = () => tile.classList.add('tile-cam-off')
       track.onunmute = () => tile.classList.remove('tile-cam-off')
     })
+    // Audio mute indicator is handled via 'mic_state' WebSocket
+    // messages, not track events (track.enabled changes don't
+    // fire onmute on the remote side).
   }
 }
 
@@ -378,7 +391,38 @@ const removeTile = (userId) => {
   if (tile) tile.remove()
 }
 
+// === TILE MIC INDICATOR ===
+//
+// Adds/removes a small muted-mic icon on a tile.
+// Local tile: updated in the mic button click handler.
+// Remote tiles: updated via 'mic_state' WebSocket messages.
+
+const updateTileMicIndicator = (tile, muted) => {
+  let mic = tile.querySelector('.tile-mic-off')
+  if (muted) {
+    if (!mic) {
+      mic = document.createElement('span')
+      mic.className = 'tile-mic-off'
+      mic.innerHTML = ICONS.tileMicOff
+      tile.appendChild(mic)
+    }
+  } else if (mic) {
+    mic.remove()
+  }
+}
+
+// Remote mic state — broadcast by the muting user, relayed by server
+onMessage('mic_state', ({ senderUserId, muted }) => {
+  const tile = tilesContainer.querySelector(`[data-user-id="${senderUserId}"]`)
+  if (tile) updateTileMicIndicator(tile, muted)
+})
+
 // === MEDIA CONTROLS OVERLAY (right edge of window) ===
+//
+// Vertical strip pinned to the right edge of #view-watch, overlaying
+// the movie. Contains mic toggle, video toggle, and leave button.
+// Shown/hidden by the same JS auto-hide timer as #controls-bar.
+// stopPropagation on all clicks so the movie doesn't pause/interact.
 
 const controlsOverlay = (() => {
   const panel = document.createElement('div')
@@ -387,9 +431,10 @@ const controlsOverlay = (() => {
   panel.addEventListener('mousedown',   (e) => e.stopPropagation())
   panel.addEventListener('pointerdown', (e) => e.stopPropagation())
 
+  // Mic toggle
   const btnMic = document.createElement('button')
   btnMic.className = 'wc-btn'
-  btnMic.textContent = '🎤'
+  btnMic.innerHTML = ICONS.micOn
   btnMic.title = 'Toggle microphone'
   btnMic.addEventListener('click', (e) => {
     e.stopPropagation()
@@ -397,13 +442,19 @@ const controlsOverlay = (() => {
     const track = localStream.getAudioTracks()[0]
     if (!track) return
     track.enabled = !track.enabled
-    btnMic.textContent = track.enabled ? '🎤' : '🔇'
+    btnMic.innerHTML = track.enabled ? ICONS.micOn : ICONS.micOff
     btnMic.classList.toggle('wc-btn-off', !track.enabled)
+    // Update local tile indicator
+    const selfTile = tilesContainer.querySelector('.tile-self')
+    if (selfTile) updateTileMicIndicator(selfTile, !track.enabled)
+    // Broadcast to all peers via server
+    wsSend('mic_state', { muted: !track.enabled })
   })
 
+  // Video toggle
   const btnVid = document.createElement('button')
   btnVid.className = 'wc-btn'
-  btnVid.textContent = '📹'
+  btnVid.innerHTML = ICONS.vidOn
   btnVid.title = 'Toggle camera'
   btnVid.addEventListener('click', (e) => {
     e.stopPropagation()
@@ -411,15 +462,16 @@ const controlsOverlay = (() => {
     const track = localStream.getVideoTracks()[0]
     if (!track) return
     track.enabled = !track.enabled
-    btnVid.textContent = track.enabled ? '📹' : '🚫'
+    btnVid.innerHTML = track.enabled ? ICONS.vidOn : ICONS.vidOff
     btnVid.classList.toggle('wc-btn-off', !track.enabled)
     const selfTile = tilesContainer.querySelector('.tile-self')
     if (selfTile) selfTile.classList.toggle('tile-cam-off', !track.enabled)
   })
 
+  // Leave
   const btnLeave = document.createElement('button')
   btnLeave.className = 'wc-btn wc-btn-leave'
-  btnLeave.textContent = '✕'
+  btnLeave.innerHTML = ICONS.leave
   btnLeave.title = 'Leave room'
   btnLeave.addEventListener('click', (e) => {
     e.stopPropagation()
@@ -439,13 +491,16 @@ const controlsOverlay = (() => {
 
 const webrtc = {
 
+  // Called after file verdict is valid, before entering watch view.
+  // Prompts for camera/mic. Sets webrtcReady so signaling can begin.
   requestPermissions: async () => {
     await getLocalStream()
     webrtcReady = true
   },
 
   // Called by ui.js after entering watch view.
-  // Sends offers to everyone already in the room.
+  // Drains buffered inbound offers, then sends offers to everyone
+  // already in the room that we haven't connected to yet.
   connectToExistingMembers: async (members) => {
     if (!webrtcReady) return
 
@@ -458,9 +513,18 @@ const webrtc = {
       createLocalTile(stream)
     }
 
+    // First, answer any offers that arrived while we were in the lobby
+    for (const [senderUserId, offer] of Object.entries(pendingOffers)) {
+      const member = roomState.members.find(m => m.userId === senderUserId)
+      ensureRemoteTile(senderUserId, member ? member.name : senderUserId)
+      await handleInboundOffer(senderUserId, offer)
+    }
+    for (const key of Object.keys(pendingOffers)) delete pendingOffers[key]
+
+    // Then send offers to anyone we haven't connected to yet
     for (const member of members) {
       if (member.userId === roomState.myUserId) continue
-      if (peerConnections[member.userId]) continue  // already connected
+      if (peerConnections[member.userId]) continue
       ensureRemoteTile(member.userId, member.name)
       await createOffer(member.userId, iceServers)
     }
@@ -472,7 +536,6 @@ const webrtc = {
 
   onMemberJoined: async (member) => {
     if (member.userId === roomState.myUserId) return
-    ensureRemoteTile(member.userId, member.name)
     await _onMemberJoined(member)
   },
 
@@ -500,6 +563,7 @@ const webrtc = {
     tilesContainer.innerHTML = ''
     turnCredentials          = null
     turnCredentialsExpiresAt = 0
+    for (const key of Object.keys(pendingOffers)) delete pendingOffers[key]
   },
 }
 

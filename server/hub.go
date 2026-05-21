@@ -126,12 +126,20 @@ type WebRTCRelayEvent struct {
 	data         []byte
 }
 
+// MicStateEvent — broadcast mic mute/unmute to all other room members.
+// senderUserId is server-injected so clients can't spoof identity.
+type MicStateEvent struct {
+	client *Client
+	muted  bool
+}
+
 func (e *RegisterEvent)    execute(h *Hub) { h.handleRegister(e.client) }
 func (e *UnregisterEvent)  execute(h *Hub) { h.handleUnregister(e.client) }
 func (e *RelayEvent)       execute(h *Hub) { h.handleRelay(e) }
 func (e *SyncEvent)        execute(h *Hub) { h.handleSyncCommand(e.client, e.raw) }
 func (e *FileVerifyEvent)  execute(h *Hub) { h.handleFileVerifyCommand(e.client, e.hex) }
 func (e *WebRTCRelayEvent) execute(h *Hub) { h.handleWebRTCRelay(e.client, e.targetUserId, e.data) }
+func (e *MicStateEvent)    execute(h *Hub) { h.handleMicState(e.client, e.muted) }
 
 // ── Hub ──────────────────────────────────────────────────────────────────────
 
@@ -377,6 +385,15 @@ func (h *Hub) handleWebRTCRelay(sender *Client, targetUserId string, raw []byte)
 	default:
 		h.dropClient(room, target)
 	}
+}
+
+// ── Mic State Broadcast ──────────────────────────────────────────────────────
+
+func (h *Hub) handleMicState(c *Client, muted bool) {
+	h.broadcastToOthers(c.roomCode, c.userId, makeEnvelope("mic_state", map[string]interface{}{
+		"senderUserId": c.userId,
+		"muted":        muted,
+	}))
 }
 
 // ── Broadcast Helpers ────────────────────────────────────────────────────────
@@ -955,6 +972,15 @@ func (c *Client) readPump() {
 				targetUserId: p.TargetUserId,
 				data:         raw,
 			}
+
+		case "mic_state":
+			var p struct {
+				Muted bool `json:"muted"`
+			}
+			if err := json.Unmarshal(env.Payload, &p); err != nil {
+				continue
+			}
+			c.hub.events <- &MicStateEvent{client: c, muted: p.Muted}
 
 		default:
 			// Unknown type — drop silently.

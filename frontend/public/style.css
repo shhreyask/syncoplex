@@ -238,6 +238,15 @@ body[data-view="watch"]   #view-watch    { display: flex; }
   z-index: 1;
 }
 
+.tile-mic-off {
+  position: absolute;
+  bottom: 3px;
+  right: 5px;
+  line-height: 0;
+  z-index: 1;
+  pointer-events: none;
+}
+
 .tile-cam-off video { display: none; }
 
 .tile-cam-off::after {
