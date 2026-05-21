@@ -964,7 +964,7 @@ func (c *Client) readPump() {
 			if err := json.Unmarshal(env.Payload, &p); err != nil {
 				continue
 			}
-			if p.TargetUserId == "" {
+			if p.TargetUserId == "" || len(p.TargetUserId) > 64 {
 				continue
 			}
 			c.hub.events <- &WebRTCRelayEvent{

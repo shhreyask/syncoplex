@@ -15,10 +15,10 @@ const (
 	PongWait                   = 60             // seconds — max silence before drop
 	SendBufferSize             = 256            // buffered send channel size per client
 	MaxNameLength              = 32
-	RateRoomCreate             = 20  			// requests per minute per IP
-	RateRoomLookup             = 10  			// requests per minute per IP
-	RateTurnCredentials        = 30  			// requests per minute per IP
-	MaxPlaybackPositionSeconds = 86400 			// max seconds in a movie
+	RateRoomCreate             = 20             // requests per minute per IP
+	RateRoomLookup             = 10             // requests per minute per IP
+	RateTurnCredentials        = 30             // requests per minute per IP
+	MaxPlaybackPositionSeconds = 86400          // max seconds in a movie
 )
 
 type Config struct {
@@ -27,34 +27,31 @@ type Config struct {
 	RedisPassword string
 	AllowedOrigin string
 
-	// Metered TURN — managed TURN service 
-	MeteredTurnHost   string
-	MeteredUsername   string
-	MeteredCredential string
+	// Metered TURN — ephemeral credentials via REST API
+	MeteredTurnHost string
+	MeteredAPIKey   string
 }
 
 func LoadConfig() Config {
 	cfg := Config{
-		Port:              getEnv("PORT", "8080"),
-		RedisAddr:         getEnv("REDIS_ADDR", "127.0.0.1:6379"),
-		RedisPassword:     getEnv("REDIS_PASSWORD", ""),
-		AllowedOrigin:     getEnv("ALLOWED_ORIGIN", "https://syncoplex.app"),
-		MeteredTurnHost:   getEnv("METERED_TURN_HOST", ""),
-		MeteredUsername:    getEnv("METERED_USERNAME", ""),
-		MeteredCredential: getEnv("METERED_CREDENTIAL", ""),
+		Port:            getEnv("PORT", "8080"),
+		RedisAddr:       getEnv("REDIS_ADDR", "127.0.0.1:6379"),
+		RedisPassword:   getEnv("REDIS_PASSWORD", ""),
+		AllowedOrigin:   getEnv("ALLOWED_ORIGIN", "https://syncoplex.app"),
+		MeteredTurnHost: getEnv("METERED_TURN_HOST", ""),
+		MeteredAPIKey:   getEnv("METERED_API_KEY", ""),
 	}
 
 	// Validate port is a real number — fail fast on bad config
 	if _, err := strconv.Atoi(cfg.Port); err != nil {
-		log.Fatalf("config: PORT must be a number, got %q", cfg.Port)
+		log.Fatalf("config: PORT %q is not a valid number", cfg.Port)
 	}
-
 	if cfg.RedisPassword == "" {
 		log.Println("config: WARNING — REDIS_PASSWORD is not set")
 	}
 
-	if cfg.MeteredTurnHost == "" || cfg.MeteredUsername == "" || cfg.MeteredCredential == "" {
-		log.Println("config: WARNING — METERED_TURN_HOST, METERED_USERNAME, or METERED_CREDENTIAL not set — TURN relay disabled, direct P2P only")
+	if cfg.MeteredTurnHost == "" || cfg.MeteredAPIKey == "" {
+		log.Println("config: WARNING — METERED_TURN_HOST or METERED_API_KEY not set — TURN relay disabled, direct P2P only")
 	}
 
 	return cfg
