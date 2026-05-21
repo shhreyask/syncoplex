@@ -38,7 +38,7 @@ const getTurnCredentials = async () => {
   if (turnCredentials && Date.now() < turnCredentialsExpiresAt - 60_000) {
     return turnCredentials
   }
-  const res = await fetch('/api/turn-credentials')
+  const res = await fetch('/api/turn-credentials', { signal: AbortSignal.timeout(5000) })
   if (!res.ok) throw new Error('turn-credentials fetch failed')
   const data               = await res.json()
   turnCredentials          = data.iceServers

@@ -90,7 +90,7 @@ server/
 │                       Add handleMicState — broadcastToOthers with senderUserId
 │                       Add mic_state case to readPump switch
 └── turn.go             NEW — GET /api/turn-credentials handler
-                        Calls Metered REST API server-side for ephemeral creds (4hr TTL)
+                        Calls Metered REST API server-side for ephemeral creds (6hr TTL)
                         Server-side cache (10 min) to avoid hammering Metered API
                         API key never leaves server — clients get only ephemeral creds
                         Base STUN servers (Google x2 + Cloudflare Mumbai)

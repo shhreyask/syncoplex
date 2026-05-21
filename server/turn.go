@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"sync"
 	"time"
+	"golang.org/x/sync/singleflight"
 )
 
 // ── Ephemeral TURN Credential Cache ──────────────────────────────────────
@@ -24,11 +25,12 @@ var (
 	turnCacheMu     sync.RWMutex
 	turnCacheData   []any
 	turnCacheExpiry time.Time
+	turnFlight      singleflight.Group
 )
 
 const (
 	turnCacheTTL      = 10 * time.Minute
-	turnCredentialTTL = 6 * 60 * 60 // 4 hours in seconds
+	turnCredentialTTL = 6 * 60 * 60 // 6 hours in seconds
 )
 
 func fetchMeteredCredentials(cfg Config) ([]any, error) {
@@ -41,38 +43,56 @@ func fetchMeteredCredentials(cfg Config) ([]any, error) {
 	}
 	turnCacheMu.RUnlock()
 
-	// Cache miss — call Metered REST API
-	url := "https://" + cfg.MeteredTurnHost + "/api/v1/turn/credentials?apiKey=" + cfg.MeteredAPIKey +
-		"&expiresIn=" + itoa(turnCredentialTTL)
+	// Coalesce concurrent fetches
+	result, err, _ := turnFlight.Do("turn", func() (any, error) {
+		// Double-check cache
+		turnCacheMu.RLock()
+		if turnCacheData != nil && time.Now().Before(turnCacheExpiry) {
+			cached := turnCacheData
+			turnCacheMu.RUnlock()
+			return cached, nil
+		}
+		turnCacheMu.RUnlock()
 
-	resp, err := http.Get(url)
+		// Cache miss — call Metered REST API
+		url := "https://" + cfg.MeteredTurnHost + "/api/v1/turn/credentials?apiKey=" + cfg.MeteredAPIKey +
+			"&expiresIn=" + itoa(turnCredentialTTL)
+
+		client := &http.Client{Timeout: 10 * time.Second}
+		resp, err := client.Get(url)
+		if err != nil {
+			return nil, err
+		}
+		defer resp.Body.Close()
+
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, err
+		}
+
+		if resp.StatusCode != 200 {
+			log.Printf("turn: Metered API returned %d: %s", resp.StatusCode, string(body))
+			return nil, fmt.Errorf("metered API returned %d", resp.StatusCode)
+		}
+
+		var iceServers []any
+		if err := json.Unmarshal(body, &iceServers); err != nil {
+			return nil, err
+		}
+
+		// Update cache
+		turnCacheMu.Lock()
+		turnCacheData = iceServers
+		turnCacheExpiry = time.Now().Add(turnCacheTTL)
+		turnCacheMu.Unlock()
+
+		return iceServers, nil
+	})
+
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	if resp.StatusCode != 200 {
-		log.Printf("turn: Metered API returned %d: %s", resp.StatusCode, string(body))
-		return nil, err
-	}
-
-	var iceServers []any
-	if err := json.Unmarshal(body, &iceServers); err != nil {
-		return nil, err
-	}
-
-	// Update cache
-	turnCacheMu.Lock()
-	turnCacheData = iceServers
-	turnCacheExpiry = time.Now().Add(turnCacheTTL)
-	turnCacheMu.Unlock()
-
-	return iceServers, nil
+	return result.([]any), nil
 }
 
 func itoa(n int) string {
@@ -110,11 +130,11 @@ func handleTurnCredentials(cfg Config) http.HandlerFunc {
 			}
 		}
 
+		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"iceServers": iceServers,
 			"expiresAt":  time.Now().Add(turnCacheTTL).UnixMilli(),
 		})
-		w.Header().Set("Cache-Control", "no-store")
 	}
 }
