@@ -21,6 +21,14 @@ const WEBRTC_RECONNECT_GRACE = 2500
 const WEBRTC_BACKSTOP_MS     = 30000
 const WEBRTC_MAX_PENDING     = 50
 
+// STUN-only fallback — used when the TURN credential fetch fails.
+// Connections still attempt P2P via STUN; only TURN relay is lost.
+const FALLBACK_ICE_SERVERS = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+  { urls: 'stun:stun.cloudflare.com:3478' },
+]
+
 // === STATE ===
 
 // webrtcReady gates all signaling (outbound AND inbound).
@@ -38,12 +46,17 @@ const getTurnCredentials = async () => {
   if (turnCredentials && Date.now() < turnCredentialsExpiresAt - 60_000) {
     return turnCredentials
   }
-  const res = await fetch('/api/turn-credentials', { signal: AbortSignal.timeout(5000) })
-  if (!res.ok) throw new Error('turn-credentials fetch failed')
-  const data               = await res.json()
-  turnCredentials          = data.iceServers
-  turnCredentialsExpiresAt = data.expiresAt
-  return turnCredentials
+  try {
+    const res = await fetch('/api/turn-credentials', { signal: AbortSignal.timeout(5000) })
+    if (!res.ok) throw new Error('turn-credentials fetch failed')
+    const data               = await res.json()
+    turnCredentials          = data.iceServers
+    turnCredentialsExpiresAt = data.expiresAt
+    return turnCredentials
+  } catch {
+    console.warn('TURN credential fetch failed — falling back to STUN only')
+    return FALLBACK_ICE_SERVERS
+  }
 }
 
 // === LOCAL STREAM (promise-cached, constrained to 320×180@24fps) ===
