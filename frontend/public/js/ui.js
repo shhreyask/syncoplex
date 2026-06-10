@@ -87,7 +87,7 @@ btnCreate.addEventListener('click', async () => {
     const roomCode = data.code
     if (!roomCode) throw new Error('No room code in response')
 
-    history.pushState({}, '', `/room/${roomCode}`)
+    history.pushState({ view: 'lobby' }, '', `/room/${roomCode}`)  
     enterLobby(roomCode)
   } catch (err) {
     showError(landingError, 'Could not create room. Is the server running?')
@@ -121,7 +121,7 @@ const joinFromInput = async () => {
     if (!data.exists) { showError(landingError, 'Room not found.'); return }
     if (data.full)    { showError(landingError, 'Room is full.');    return }
 
-    history.pushState({}, '', `/room/${code}`)
+    history.pushState({ view: 'lobby' }, '', `/room/${code}`)  
     enterLobby(code)
   } catch (err) {
     showError(landingError, 'Could not reach server.')
@@ -153,18 +153,15 @@ inputName.addEventListener('keydown', (e) => {
 
 btnCopyCode.addEventListener('click', () => {
   if (!roomState.roomCode) return
-  navigator.clipboard.writeText(roomState.roomCode).then(() => {
+  const shareUrl = `${location.origin}/room/${roomState.roomCode}`
+  navigator.clipboard.writeText(shareUrl).then(() => {
     btnCopyCode.textContent = '✓'
     setTimeout(() => { btnCopyCode.textContent = '⎘' }, 1500)
   })
 })
 
-btnLeaveLobby.addEventListener('click', () => {
-  webrtc.teardownAll()
-  disconnect()
-  resetRoomState()
-  history.pushState({}, '', '/')
-  showView('landing')
+btnLeaveLobby.addEventListener('click', () => {  
+  history.back()
 })
 
 // "Pick File & Watch" — visible only when connected.
@@ -296,6 +293,7 @@ const tryEnterWatch = async () => {
                 roomState.fileState !== FILE_STATES.HASHING
   if (roomState.fileVerdict === FILE_VERDICTS.VALID && ready) {
     await webrtc.requestPermissions()
+    history.pushState({ view: 'watch' }, '', location.pathname)  
     showView('watch')
     render()
     pendingWatchTransition = false
@@ -376,6 +374,58 @@ document.addEventListener('player:ready', () => {
   render()
 })
 
+// ── Browser Back Button ──────────────────────────────────────────  
+//
+// History stack: landing → lobby (/room/CODE) → watch (/room/CODE)
+// Back from watch returns to lobby (WS stays alive, file state resets).
+// Back from lobby returns to landing (full disconnect).
+
+window.addEventListener('popstate', (e) => {
+  const targetView  = e.state?.view || 'landing'
+  const currentView = document.body.dataset.view
+
+  if (targetView === currentView) return
+
+  // ── Cleanup when leaving watch (back or skip to landing) ──
+    if (currentView === 'watch') {
+    webrtc.teardownAll()
+    video.pause()
+    pendingWatchTransition = false
+    resetFileState()
+    notifyUpdate()
+  }
+
+  // ── Target: landing ──
+  if (targetView === 'landing') {
+    webrtc.teardownAll()   // idempotent — safe if already called above
+    disconnect()
+    resetRoomState()
+    showView('landing')
+    return
+  }
+
+  // ── Target: lobby ──
+  if (targetView === 'lobby') {
+    if (!roomState.roomCode) {
+      // Forward to lobby after room state was cleared — can't restore.
+      showView('landing')
+      history.replaceState({ view: 'landing' }, '', '/')
+      return
+    }
+    showView('lobby')
+    notifyUpdate()
+    return
+  }
+
+  // ── Target: watch ──
+  if (targetView === 'watch') {
+    // Forward to watch — file & WebRTC state already cleared, can't restore.
+    // Neutralize this history entry so forward doesn't keep landing here.
+    history.replaceState({ view: currentView }, '', location.pathname)
+    return
+  }
+})
+
 // ── Main Render ──────────────────────────────────────────────────
 
 const render = () => {
@@ -398,7 +448,13 @@ const initFromUrl = () => {
   const match = location.pathname.match(/^\/room\/([A-Z0-9-]+)$/i)
   if (match) {
     inputJoinCode.value = match[1].toUpperCase()
+    // Highlight Join as the primary action when URL has a room code
+    btnJoin.classList.remove('btn-secondary')
+    btnJoin.classList.add('btn-primary')
+    btnCreate.classList.remove('btn-primary')
+    btnCreate.classList.add('btn-secondary')
   }
+  history.replaceState({ view: 'landing' }, '', location.pathname)  
   showView('landing')
 }
 

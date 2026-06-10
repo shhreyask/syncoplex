@@ -60,24 +60,33 @@ const notifyUpdate = () => {
   document.dispatchEvent(new CustomEvent('room:updated'))
 }
 
-//Single reset call
+// ── Partial Reset — File + Playback Only ─────────────────────────
+//
+// Used by: popstate watch→lobby (keep room identity + WS alive)
+//          resetRoomState (full teardown calls this internally)
+//
+// Does NOT call notifyUpdate() — caller decides when to notify.
+
+const resetFileState = () => {
+  roomState.file             = null
+  if (roomState.blobUrl) URL.revokeObjectURL(roomState.blobUrl)
+  roomState.blobUrl          = null
+  roomState.fileReady        = false
+  roomState.fileHash         = null
+  roomState.fileState        = FILE_STATES.WAITING
+  roomState.fileVerdict      = FILE_VERDICTS.PENDING
+  roomState.fileVerdictError = null
+  roomState.playback         = { playing: false, position: 0, serverTime: null }
+}
+
 const resetRoomState = () => {
-    roomState.roomCode        = null
-    roomState.myUserId        = null
-    roomState.myName          = null
-    roomState.sessionToken    = null
-    roomState.members         = []
-    roomState.playback        = { playing: false, position: 0, serverTime: null }
-    roomState.file            = null
-    if (roomState.blobUrl) URL.revokeObjectURL(roomState.blobUrl)
-    roomState.blobUrl         = null
-    roomState.fileReady       = false
-    roomState.fileHash        = null
-    roomState.fileState       = FILE_STATES.WAITING
-    roomState.fileVerdict     = FILE_VERDICTS.PENDING
-    roomState.fileVerdictError = null
-    // one notifyUpdate() at the end, not one per field
-    notifyUpdate()
+  roomState.roomCode     = null
+  roomState.myUserId     = null
+  roomState.myName       = null
+  roomState.sessionToken = null
+  roomState.members      = []
+  resetFileState()
+  notifyUpdate()
 }
 
 // ── State Helpers ────────────────────────────────────────────────
