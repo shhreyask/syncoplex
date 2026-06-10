@@ -488,13 +488,9 @@ const controlsOverlay = (() => {
   btnLeave.className = 'wc-btn wc-btn-leave'
   btnLeave.innerHTML = ICONS.leave
   btnLeave.title = 'Leave room'
-  btnLeave.addEventListener('click', (e) => {
+  btnLeave.addEventListener('click', (e) => {  
     e.stopPropagation()
-    webrtc.teardownAll()
-    disconnect()
-    resetRoomState()
-    history.pushState({}, '', '/')
-    showView('landing')
+    history.back()
   })
 
   panel.append(btnMic, btnVid, btnLeave)

@@ -87,7 +87,7 @@ btnCreate.addEventListener('click', async () => {
     const roomCode = data.code
     if (!roomCode) throw new Error('No room code in response')
 
-    history.pushState({}, '', `/room/${roomCode}`)
+    history.pushState({ view: 'lobby' }, '', `/room/${roomCode}`)  
     enterLobby(roomCode)
   } catch (err) {
     showError(landingError, 'Could not create room. Is the server running?')
@@ -121,7 +121,7 @@ const joinFromInput = async () => {
     if (!data.exists) { showError(landingError, 'Room not found.'); return }
     if (data.full)    { showError(landingError, 'Room is full.');    return }
 
-    history.pushState({}, '', `/room/${code}`)
+    history.pushState({ view: 'lobby' }, '', `/room/${code}`)  
     enterLobby(code)
   } catch (err) {
     showError(landingError, 'Could not reach server.')
@@ -160,12 +160,8 @@ btnCopyCode.addEventListener('click', () => {
   })
 })
 
-btnLeaveLobby.addEventListener('click', () => {
-  webrtc.teardownAll()
-  disconnect()
-  resetRoomState()
-  history.pushState({}, '', '/')
-  showView('landing')
+btnLeaveLobby.addEventListener('click', () => {  
+  history.back()
 })
 
 // "Pick File & Watch" — visible only when connected.
@@ -297,6 +293,7 @@ const tryEnterWatch = async () => {
                 roomState.fileState !== FILE_STATES.HASHING
   if (roomState.fileVerdict === FILE_VERDICTS.VALID && ready) {
     await webrtc.requestPermissions()
+    history.pushState({ view: 'watch' }, '', location.pathname)  
     showView('watch')
     render()
     pendingWatchTransition = false
@@ -377,6 +374,46 @@ document.addEventListener('player:ready', () => {
   render()
 })
 
+// ── Browser Back Button ──────────────────────────────────────────  
+//
+// History stack: landing → lobby (/room/CODE) → watch (/room/CODE)
+// Back from watch returns to lobby (WS stays alive, file state resets).
+// Back from lobby returns to landing (full disconnect).
+
+window.addEventListener('popstate', () => {
+  const currentView = document.body.dataset.view
+
+  if (currentView === 'watch') {
+    // watch → lobby: tear down WebRTC + file, keep WS alive
+    webrtc.teardownAll()
+    video.pause()
+    pendingWatchTransition     = false
+    roomState.file             = null
+    if (roomState.blobUrl) {
+      URL.revokeObjectURL(roomState.blobUrl)
+      roomState.blobUrl = null
+    }
+    roomState.fileReady        = false
+    roomState.fileHash         = null
+    roomState.fileState        = FILE_STATES.WAITING
+    roomState.fileVerdict      = FILE_VERDICTS.PENDING
+    roomState.fileVerdictError = null
+    roomState.playback         = { playing: false, position: 0, serverTime: null }
+    showView('lobby')
+    notifyUpdate()
+    return
+  }
+
+  if (currentView === 'lobby') {
+    // lobby → landing: full teardown
+    webrtc.teardownAll()
+    disconnect()
+    resetRoomState()
+    showView('landing')
+    return
+  }
+})
+
 // ── Main Render ──────────────────────────────────────────────────
 
 const render = () => {
@@ -405,6 +442,7 @@ const initFromUrl = () => {
     btnCreate.classList.remove('btn-primary')
     btnCreate.classList.add('btn-secondary')
   }
+  history.replaceState({ view: 'landing' }, '', location.pathname)  
   showView('landing')
 }
 
