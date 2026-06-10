@@ -153,7 +153,8 @@ inputName.addEventListener('keydown', (e) => {
 
 btnCopyCode.addEventListener('click', () => {
   if (!roomState.roomCode) return
-  navigator.clipboard.writeText(roomState.roomCode).then(() => {
+  const shareUrl = `${location.origin}/room/${roomState.roomCode}`
+  navigator.clipboard.writeText(shareUrl).then(() => {
     btnCopyCode.textContent = '✓'
     setTimeout(() => { btnCopyCode.textContent = '⎘' }, 1500)
   })
@@ -398,6 +399,11 @@ const initFromUrl = () => {
   const match = location.pathname.match(/^\/room\/([A-Z0-9-]+)$/i)
   if (match) {
     inputJoinCode.value = match[1].toUpperCase()
+    // Highlight Join as the primary action when URL has a room code
+    btnJoin.classList.remove('btn-secondary')
+    btnJoin.classList.add('btn-primary')
+    btnCreate.classList.remove('btn-primary')
+    btnCreate.classList.add('btn-secondary')
   }
   showView('landing')
 }
