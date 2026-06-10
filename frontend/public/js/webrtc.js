@@ -220,7 +220,7 @@ const handleInboundOffer = async (senderUserId, offer) => {
 
   const existingPc = peerConnections[senderUserId]
 
-  if (existingPc && existingPc.connectionState !== 'failed') {
+  if (existingPc && existingPc.connectionState === 'connected') {
     await existingPc.setRemoteDescription(new RTCSessionDescription(offer))
     drainPendingCandidates(senderUserId, existingPc)
     const answer = await existingPc.createAnswer()
