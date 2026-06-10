@@ -387,21 +387,12 @@ window.addEventListener('popstate', (e) => {
   if (targetView === currentView) return
 
   // ── Cleanup when leaving watch (back or skip to landing) ──
-  if (currentView === 'watch') {
+    if (currentView === 'watch') {
     webrtc.teardownAll()
     video.pause()
-    pendingWatchTransition     = false
-    roomState.file             = null
-    if (roomState.blobUrl) {
-      URL.revokeObjectURL(roomState.blobUrl)
-      roomState.blobUrl = null
-    }
-    roomState.fileReady        = false
-    roomState.fileHash         = null
-    roomState.fileState        = FILE_STATES.WAITING
-    roomState.fileVerdict      = FILE_VERDICTS.PENDING
-    roomState.fileVerdictError = null
-    roomState.playback         = { playing: false, position: 0, serverTime: null }
+    pendingWatchTransition = false
+    resetFileState()
+    notifyUpdate()
   }
 
   // ── Target: landing ──
