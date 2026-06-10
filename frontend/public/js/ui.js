@@ -380,11 +380,14 @@ document.addEventListener('player:ready', () => {
 // Back from watch returns to lobby (WS stays alive, file state resets).
 // Back from lobby returns to landing (full disconnect).
 
-window.addEventListener('popstate', () => {
+window.addEventListener('popstate', (e) => {
+  const targetView  = e.state?.view || 'landing'
   const currentView = document.body.dataset.view
 
+  if (targetView === currentView) return
+
+  // ── Cleanup when leaving watch (back or skip to landing) ──
   if (currentView === 'watch') {
-    // watch → lobby: tear down WebRTC + file, keep WS alive
     webrtc.teardownAll()
     video.pause()
     pendingWatchTransition     = false
@@ -399,17 +402,35 @@ window.addEventListener('popstate', () => {
     roomState.fileVerdict      = FILE_VERDICTS.PENDING
     roomState.fileVerdictError = null
     roomState.playback         = { playing: false, position: 0, serverTime: null }
+  }
+
+  // ── Target: landing ──
+  if (targetView === 'landing') {
+    webrtc.teardownAll()   // idempotent — safe if already called above
+    disconnect()
+    resetRoomState()
+    showView('landing')
+    return
+  }
+
+  // ── Target: lobby ──
+  if (targetView === 'lobby') {
+    if (!roomState.roomCode) {
+      // Forward to lobby after room state was cleared — can't restore.
+      showView('landing')
+      history.replaceState({ view: 'landing' }, '', '/')
+      return
+    }
     showView('lobby')
     notifyUpdate()
     return
   }
 
-  if (currentView === 'lobby') {
-    // lobby → landing: full teardown
-    webrtc.teardownAll()
-    disconnect()
-    resetRoomState()
-    showView('landing')
+  // ── Target: watch ──
+  if (targetView === 'watch') {
+    // Forward to watch — file & WebRTC state already cleared, can't restore.
+    // Neutralize this history entry so forward doesn't keep landing here.
+    history.replaceState({ view: currentView }, '', location.pathname)
     return
   }
 })
