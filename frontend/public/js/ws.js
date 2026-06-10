@@ -31,12 +31,14 @@ const getBackoff = (attempt) => {
 //
 // Other modules register handlers via onMessage(type, fn).
 // ws.js routes incoming messages to them by type.
+// Multiple handlers per type are supported — all fire in registration order.
 // Unknown types are silently dropped.
 
 const handlers = {}
 
 const onMessage = (type, fn) => {
-  handlers[type] = fn
+  if (!handlers[type]) handlers[type] = []
+  handlers[type].push(fn)
 }
 
 // ── Send ─────────────────────────────────────────────────────────
@@ -113,7 +115,8 @@ const connect = (roomCode, name) => {
     }
 
     if (typeof msg.type !== 'string') return
-    if (handlers[msg.type]) handlers[msg.type](msg.payload ?? {})
+    const fns = handlers[msg.type]
+    if (fns) fns.forEach(fn => fn(msg.payload ?? {}))
     // Unknown types silently dropped
   }
 

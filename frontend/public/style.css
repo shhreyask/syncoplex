@@ -24,7 +24,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
 section                                  { display: none; }
 body[data-view="landing"] #view-landing  { display: flex; }
 body[data-view="lobby"]   #view-lobby    { display: flex; }
-body[data-view="watch"]   #view-watch    { display: block; }
+body[data-view="watch"]   #view-watch    { display: flex; }
 
 /* ── Landing ────────────────────────────────────────────────────── */
 #view-landing {
@@ -183,9 +183,152 @@ body[data-view="watch"]   #view-watch    { display: block; }
 
 /* ── Watch View ─────────────────────────────────────────────────── */
 #view-watch {
-  position: relative;
-  width: 100vw;
+  flex-direction: column;
   height: 100vh;
+  background: #000;
+  overflow: hidden;
+}
+
+/* ── Tile Strip ─────────────────────────────────────────────────── */
+#tiles {
+  width: 100%;
+  height: 84px;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px;
+  background: #0a0a0a;
+  flex-shrink: 0;
+}
+
+.tile {
+  width: 120px;
+  height: 68px;
+  background: #111;
+  border-radius: var(--radius);
+  overflow: hidden;
+  flex-shrink: 0;
+  position: relative;
+}
+
+.tile video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.tile-self {
+  border: 1px solid var(--accent);
+}
+
+.tile-label {
+  position: absolute;
+  bottom: 4px;
+  left: 6px;
+  font-size: 0.65rem;
+  color: #fff;
+  text-shadow: 0 1px 2px rgba(0,0,0,0.8);
+  pointer-events: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 108px;
+  z-index: 1;
+}
+
+.tile-mic-off {
+  position: absolute;
+  bottom: 3px;
+  right: 5px;
+  line-height: 0;
+  z-index: 1;
+  pointer-events: none;
+}
+
+.tile-cam-off video { display: none; }
+
+.tile-cam-off::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #111;
+}
+
+/* ── WebRTC Controls Overlay (right edge of window) ──────────────
+ *
+ * Vertical strip pinned to the right edge of #view-watch.
+ * Shown/hidden by the same JS auto-hide timer as #controls-bar.
+ */
+
+#webrtc-controls {
+  position: absolute;
+  top: 50%;
+  right: 0;
+  transform: translateY(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 6px;
+  background: rgba(0, 0, 0, 0.7);
+  border-radius: var(--radius) 0 0 var(--radius);
+  opacity: 1;
+  pointer-events: auto;
+  transition: opacity 0.3s;
+  z-index: 30;
+}
+
+#webrtc-controls.hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.wc-btn {
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  font-size: 1rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  transition: background 0.15s;
+}
+
+.wc-btn:hover {
+  background: rgba(255, 255, 255, 0.25);
+}
+
+.wc-btn-off {
+  background: rgba(255, 77, 77, 0.4);
+}
+
+.wc-btn-off:hover {
+  background: rgba(255, 77, 77, 0.6);
+}
+
+.wc-btn-leave {
+  background: rgba(255, 77, 77, 0.5);
+  margin-top: 4px;
+}
+
+.wc-btn-leave:hover {
+  background: rgba(255, 77, 77, 0.8);
+}
+
+/* ── Movie Container ─────────────────────────────────────────────── */
+#movie-container {
+  flex: 1;
+  position: relative;
   background: #000;
   overflow: hidden;
 }
@@ -352,12 +495,6 @@ body[data-view="watch"]   #view-watch    { display: block; }
 }
 
 /* ── Fingerprint Pending Indicator ───────────────────────────────── */
-/*
- * Only two things to show above the Pick File & Watch button:
- *   1. A spinner row while hashing / waiting for server verdict
- *   2. A red error line on mismatch, timeout, or Worker crash
- *      (reuses .inline-error — no extra rule needed)
- */
 
 .fileVerify-pending {
   display: flex;

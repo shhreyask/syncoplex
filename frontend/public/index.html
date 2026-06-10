@@ -89,41 +89,49 @@
   <!-- ── Watch ─────────────────────────────────────────────────── -->
   <section id="view-watch">
 
-    <div id="file-picker-overlay">
-      <div class="picker-box">
-        <p class="picker-title">Select your local copy of the movie</p>
-        <p class="picker-hint">MP4 recommended. MKV support varies by browser.</p>
-        <label class="btn btn-primary" for="input-file">Choose File</label>
-        <input id="input-file" type="file" accept=".mp4,.mkv,.avi,.mov" hidden />
-        <p id="file-error" class="inline-error" hidden></p>
-      </div>
+    <div id="tiles">
+      <!-- Tile <div> elements inserted and removed by webrtc.js -->
     </div>
 
-    <video id="main-video" playsinline crossorigin="anonymous" tabindex="-1">
-      <track id="subtitle-track" kind="subtitles" default />
-    </video>
+    <div id="movie-container">
+      <div id="file-picker-overlay">
+        <div class="picker-box">
+          <p class="picker-title">Select your local copy of the movie</p>
+          <p class="picker-hint">MP4 recommended. MKV support varies by browser.</p>
+          <label class="btn btn-primary" for="input-file">Choose File</label>
+          <input id="input-file" type="file" accept=".mp4,.mkv,.avi,.mov" hidden />
+          <p id="file-error" class="inline-error" hidden></p>
+        </div>
+      </div>
 
-    <div id="controls-bar">
-      <button id="btn-play-pause" class="ctrl-btn">▶</button>
-      <span   id="time-current"   class="time-label">0:00</span>
-      <input  id="seek-bar"       class="seek-bar" type="range" min="0" max="100" value="0" step="0.01" />
-      <span   id="time-total"     class="time-label">0:00</span>
-      <input  id="volume-slider"  class="volume-slider" type="range" min="0" max="1" step="0.05" value="1" />
-      <button id="btn-mute"       class="ctrl-btn">🔊</button>
-      <button id="btn-cc"         class="ctrl-btn" title="Load subtitles">CC</button>
-      <button id="btn-fullscreen" class="ctrl-btn" title="Fullscreen">⛶</button>
-      <input  id="input-subtitle" type="file" accept=".vtt,.srt" hidden />
+      <video id="main-video" playsinline crossorigin="anonymous" tabindex="-1">
+        <track id="subtitle-track" kind="subtitles" default />
+      </video>
+
+      <div id="controls-bar">
+        <button id="btn-play-pause" class="ctrl-btn">▶</button>
+        <span   id="time-current"   class="time-label">0:00</span>
+        <input  id="seek-bar"       class="seek-bar" type="range" min="0" max="100" value="0" step="0.01" />
+        <span   id="time-total"     class="time-label">0:00</span>
+        <input  id="volume-slider"  class="volume-slider" type="range" min="0" max="1" step="0.05" value="1" />
+        <button id="btn-mute"       class="ctrl-btn">🔊</button>
+        <button id="btn-cc"         class="ctrl-btn" title="Load subtitles">CC</button>
+        <button id="btn-fullscreen" class="ctrl-btn" title="Fullscreen">⛶</button>
+        <input  id="input-subtitle" type="file" accept=".vtt,.srt" hidden />
+      </div>
     </div>
 
   </section>
 
-  <!-- JS — order matters: state → ws → player → sync → fileVerify → ui -->
+  <!-- JS — order matters: state → ws → player → sync → fileVerify → webrtc → ui -->
   <!-- workerFileVerify.js is NOT listed here — loaded only via new Worker() -->
   <script src="/js/state.js"></script>
   <script src="/js/ws.js"></script>
   <script src="/js/player.js"></script>
   <script src="/js/sync.js"></script>
   <script src="/js/fileVerify.js"></script>
+  <script src="/js/icons.js"></script>
+  <script src="/js/webrtc.js"></script>
   <script src="/js/ui.js"></script>
 </body>
 </html>
