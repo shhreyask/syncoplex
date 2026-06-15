@@ -32,9 +32,12 @@ func generateRoomCode() string {
 // ── Room Operations ───────────────────────────────────────────────────────────
 
 func createRoom(rs *RoomStore) string {
-	code := generateRoomCode()
-	rs.Create(code, RoomTTL*time.Second)
-	return code
+	for {
+		code := generateRoomCode()
+		if rs.Create(code, RoomTTL*time.Second) {
+			return code
+		}
+	}
 }
 
 // ── HTTP Handlers ─────────────────────────────────────────────────────────────

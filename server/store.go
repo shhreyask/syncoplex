@@ -29,10 +29,16 @@ func newRoomStore() *RoomStore {
 }
 
 // Create adds a room code with the given TTL.
-func (rs *RoomStore) Create(code string, ttl time.Duration) {
+func (rs *RoomStore) Create(code string, ttl time.Duration) bool {
+	now := time.Now()
 	rs.mu.Lock()
-	rs.rooms[code] = time.Now().Add(ttl)
+	if expiresAt, ok := rs.rooms[code]; ok && now.Before(expiresAt) {
+		rs.mu.Unlock()
+		return false
+	}
+	rs.rooms[code] = now.Add(ttl)
 	rs.mu.Unlock()
+	return true
 }
 
 // Exists returns true if the code is present and has not expired.
