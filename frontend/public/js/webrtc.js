@@ -93,6 +93,24 @@ const getLocalStream = async () => {
   return localStreamPromise
 }
 
+// === PREPARE WEBRTC (shared setup for all signaling entry points) ===
+//
+// Fetches local stream + TURN credentials in parallel, creates the
+// local tile if it doesn't exist yet. Returns { stream, iceServers }.
+
+const prepareWebRTC = async () => {
+  const [stream, iceServers] = await Promise.all([
+    getLocalStream(),
+    getTurnCredentials(),
+  ])
+
+  if (!tilesContainer.querySelector('.tile-self')) {
+    createLocalTile(stream)
+  }
+
+  return { stream, iceServers }
+}
+
 // === BITRATE CAP ===
 
 const capVideoBitrate = async (pc) => {
@@ -184,14 +202,7 @@ const _onMemberJoined = async (member) => {
   if (member.userId === roomState.myUserId) return
   if (!webrtcReady) return
 
-  const [stream, iceServers] = await Promise.all([
-    getLocalStream(),
-    getTurnCredentials(),
-  ])
-
-  if (!tilesContainer.querySelector('.tile-self')) {
-    createLocalTile(stream)
-  }
+  const { iceServers } = await prepareWebRTC()
 
   // No ensureRemoteTile here — tile appears only when the remote
   // user enters watch view, answers our offer, and ontrack fires.
@@ -209,38 +220,27 @@ const createOffer = async (remoteUserId, iceServers) => {
 }
 
 const handleInboundOffer = async (senderUserId, offer) => {
-  const [stream, iceServers] = await Promise.all([
-    getLocalStream(),
-    getTurnCredentials(),
-  ])
-
-  if (!tilesContainer.querySelector('.tile-self')) {
-    createLocalTile(stream)
-  }
+  const { iceServers } = await prepareWebRTC()
 
   const existingPc = peerConnections[senderUserId]
 
-  if (existingPc && existingPc.connectionState === 'connected') {
-    await existingPc.setRemoteDescription(new RTCSessionDescription(offer))
-    drainPendingCandidates(senderUserId, existingPc)
-    const answer = await existingPc.createAnswer()
-    await existingPc.setLocalDescription(answer)
-    await capVideoBitrate(existingPc)
-    wsSend('webrtc_answer', {
-      targetUserId: senderUserId,
-      payload: existingPc.localDescription,
-    })
+  // Reuse a connected PC; otherwise tear down and create fresh.
+  const pc = (existingPc && existingPc.connectionState === 'connected')
+    ? existingPc
+    : await (async () => {
+        if (existingPc) closePeerConnection(senderUserId)
+        return createPeerConnection(senderUserId, iceServers)
+      })()
 
-  } else {
-    if (existingPc) closePeerConnection(senderUserId)
-    const pc = await createPeerConnection(senderUserId, iceServers)
-    await pc.setRemoteDescription(new RTCSessionDescription(offer))
-    drainPendingCandidates(senderUserId, pc)
-    const answer = await pc.createAnswer()
-    await pc.setLocalDescription(answer)
-    await capVideoBitrate(pc)
-    wsSend('webrtc_answer', { targetUserId: senderUserId, payload: pc.localDescription })
-  }
+  await pc.setRemoteDescription(new RTCSessionDescription(offer))
+  drainPendingCandidates(senderUserId, pc)
+  const answer = await pc.createAnswer()
+  await pc.setLocalDescription(answer)
+  await capVideoBitrate(pc)
+  wsSend('webrtc_answer', {
+    targetUserId: senderUserId,
+    payload: pc.localDescription,
+  })
 }
 
 onMessage('webrtc_offer', async ({ senderUserId, payload: offer }) => {
@@ -309,10 +309,7 @@ const _onMemberReconnected = async (member) => {
 
   } else {
     if (existing) closePeerConnection(member.userId)
-    const [, iceServers] = await Promise.all([
-      getLocalStream(),
-      getTurnCredentials(),
-    ])
+    const { iceServers } = await prepareWebRTC()
     await createOffer(member.userId, iceServers)
   }
 }
@@ -321,47 +318,41 @@ const _onMemberReconnected = async (member) => {
 
 const tilesContainer = document.getElementById('tiles')
 
-const createLocalTile = (stream) => {
+// Shared helper — builds the tile DOM structure used by all tile types.
+// Options: { isSelf, stream, camOff }
+const createTileElement = (userId, name, { isSelf = false, stream = null, camOff = false } = {}) => {
   const tile          = document.createElement('div')
-  tile.className      = 'tile tile-self'
-  tile.dataset.userId = roomState.myUserId
+  tile.className      = 'tile' + (isSelf ? ' tile-self' : '') + (camOff ? ' tile-cam-off' : '')
+  tile.dataset.userId = userId
 
   const video         = document.createElement('video')
   video.autoplay      = true
-  video.muted         = true
   video.playsInline   = true
-
-  if (stream) {
-    video.srcObject = stream
-  } else {
-    tile.classList.add('tile-cam-off')
-  }
+  if (isSelf) video.muted = true
+  if (stream) video.srcObject = stream
 
   const label         = document.createElement('span')
   label.className     = 'tile-label'
-  label.textContent   = (roomState.myName || 'You') + ' (you)'
+  label.textContent   = isSelf ? (name || 'You') + ' (you)' : (name || userId)
 
   tile.append(video, label)
+  return tile
+}
+
+const createLocalTile = (stream) => {
+  const tile = createTileElement(roomState.myUserId, roomState.myName, {
+    isSelf: true,
+    stream,
+    camOff: !stream,
+  })
   tilesContainer.append(tile)
 }
 
 const attachRemoteTile = (userId, stream) => {
   let tile = tilesContainer.querySelector(`[data-user-id="${userId}"]`)
   if (!tile) {
-    tile                = document.createElement('div')
-    tile.className      = 'tile'
-    tile.dataset.userId = userId
-
-    const video         = document.createElement('video')
-    video.autoplay      = true
-    video.playsInline   = true
-
-    const label         = document.createElement('span')
-    label.className     = 'tile-label'
-    const member        = roomState.members.find(m => m.userId === userId)
-    label.textContent   = member ? member.name : userId
-
-    tile.append(video, label)
+    const member = roomState.members.find(m => m.userId === userId)
+    tile = createTileElement(userId, member ? member.name : userId)
     tilesContainer.append(tile)
   }
 
@@ -385,19 +376,7 @@ const attachRemoteTile = (userId, stream) => {
 
 const ensureRemoteTile = (userId, name) => {
   if (tilesContainer.querySelector(`[data-user-id="${userId}"]`)) return
-  const tile          = document.createElement('div')
-  tile.className      = 'tile tile-cam-off'
-  tile.dataset.userId = userId
-
-  const video         = document.createElement('video')
-  video.autoplay      = true
-  video.playsInline   = true
-
-  const label         = document.createElement('span')
-  label.className     = 'tile-label'
-  label.textContent   = name || userId
-
-  tile.append(video, label)
+  const tile = createTileElement(userId, name, { camOff: true })
   tilesContainer.append(tile)
 }
 
@@ -442,9 +421,9 @@ onMessage('mic_state', ({ senderUserId, muted }) => {
 const controlsOverlay = (() => {
   const panel = document.createElement('div')
   panel.id = 'webrtc-controls'
-  panel.addEventListener('click',       (e) => e.stopPropagation())
-  panel.addEventListener('mousedown',   (e) => e.stopPropagation())
-  panel.addEventListener('pointerdown', (e) => e.stopPropagation())
+  ;['click', 'mousedown', 'pointerdown'].forEach(evt =>
+    panel.addEventListener(evt, (e) => e.stopPropagation())
+  )
 
   // Mic toggle
   const btnMic = document.createElement('button')
@@ -520,14 +499,7 @@ const webrtc = {
   connectToExistingMembers: async (members) => {
     if (!webrtcReady) return
 
-    const [stream, iceServers] = await Promise.all([
-      getLocalStream(),
-      getTurnCredentials(),
-    ])
-
-    if (!tilesContainer.querySelector('.tile-self')) {
-      createLocalTile(stream)
-    }
+    const { iceServers } = await prepareWebRTC()
 
     // First, answer any offers that arrived while we were in the lobby
     for (const [senderUserId, offer] of Object.entries(pendingOffers)) {

@@ -363,8 +363,8 @@ document.addEventListener('keydown', (e) => {
   if (e.code === 'Space')      { e.preventDefault(); btnPlayPause.click() }
   if (e.code === 'ArrowRight') { e.preventDefault(); player.nudge(+5) }
   if (e.code === 'ArrowLeft')  { e.preventDefault(); player.nudge(-5) }
-  if (e.code === 'KeyM')       { $('btn-mute').click() }
-  if (e.code === 'KeyF')       { $('btn-fullscreen').click() }
+  if (e.code === 'KeyM')       { btnMute.click() }
+  if (e.code === 'KeyF')       { btnFullscreen.click() }
 })
 
 // ── player:ready ─────────────────────────────────────────────────
