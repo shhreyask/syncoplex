@@ -14,9 +14,10 @@ func main() {
 
 	cfg := LoadConfig()
 
-	rdb := newRedisClient(cfg)
+	roomStore := newRoomStore()
+	sessionStore := newSessionStore()
 
-	hub := newHub(rdb)
+	hub := newHub(roomStore, sessionStore)
 	go hub.run()
 
 	upgrader := newUpgrader(cfg.AllowedOrigin)
@@ -59,11 +60,11 @@ func main() {
 
 	mux := http.NewServeMux()
 
-	mux.Handle("/rooms", wrap(handleCreateRoom(rdb), roomCreateLimiter))
-	mux.Handle("/rooms/", wrap(handleGetRoom(rdb, hub), roomLookupLimiter))
+	mux.Handle("/rooms", wrap(handleCreateRoom(roomStore), roomCreateLimiter))
+	mux.Handle("/rooms/", wrap(handleGetRoom(roomStore, hub), roomLookupLimiter))
 	mux.Handle("/api/turn-credentials", wrap(http.HandlerFunc(handleTurnCredentials(cfg)), turnLimiter))
 	mux.Handle("/ws/", securityHeaders(cors(cfg.AllowedOrigin)(
-		http.HandlerFunc(handleWebSocket(hub, rdb, upgrader)),
+		http.HandlerFunc(handleWebSocket(hub, upgrader)),
 	)))
 	mux.Handle("/", securityHeaders(staticHandler))
 

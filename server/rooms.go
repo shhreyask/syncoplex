@@ -1,15 +1,12 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"math/rand"
 	"net/http"
 	"strings"
 	"time"
-
-	"github.com/redis/go-redis/v9"
 )
 
 // ── Word List ─────────────────────────────────────────────────────────────────
@@ -32,66 +29,29 @@ func generateRoomCode() string {
 	return fmt.Sprintf("%s-%s-%d", word1, word2, digits)
 }
 
-// ── Redis Room Operations ─────────────────────────────────────────────────────
+// ── Room Operations ───────────────────────────────────────────────────────────
 
-func createRoom(ctx context.Context, rdb *redis.Client, hostID string) (string, error) {
-	code := generateRoomCode()
-	key := "room:" + code
-
-	err := rdb.HSet(ctx, key, map[string]interface{}{
-		"hostId":    hostID,
-		"createdAt": time.Now().UTC().Format(time.RFC3339),
-		"status":    "active",
-	}).Err()
-	if err != nil {
-		return "", fmt.Errorf("rooms: failed to create room in Redis — %w", err)
-	}
-
-	if err := rdb.Expire(ctx, key, RoomTTL*time.Second).Err(); err != nil {
-		return "", fmt.Errorf("rooms: failed to set TTL — %w", err)
-	}
-
-	return code, nil
-}
-
-func roomExists(ctx context.Context, rdb *redis.Client, code string) (bool, error) {
-	exists, err := rdb.Exists(ctx, "room:"+code).Result()
-	if err != nil {
-		return false, fmt.Errorf("rooms: Redis check failed — %w", err)
-	}
-	return exists > 0, nil
-}
-
-func resetRoomTTL(ctx context.Context, rdb *redis.Client, code string) {
-	// Fire and forget — TTL reset is not critical path
-	// Errors are logged but never returned to caller
-	if err := rdb.Expire(ctx, "room:"+code, RoomTTL*time.Second).Err(); err != nil {
-		// Non-fatal — room will eventually expire naturally
-		_ = err
+func createRoom(rs *RoomStore) string {
+	for {
+		code := generateRoomCode()
+		if rs.Create(code, RoomTTL*time.Second) {
+			return code
+		}
 	}
 }
 
 // ── HTTP Handlers ─────────────────────────────────────────────────────────────
 
 // POST /rooms
-// Generates a room code, writes to Redis, returns the code.
-// hostId is a placeholder at this stage — the real userId is
-// issued by session.go when the host opens the WebSocket.
-func handleCreateRoom(rdb *redis.Client) http.HandlerFunc {
+// Generates a room code, stores it in the room store, returns the code.
+func handleCreateRoom(rs *RoomStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 
-		ctx := r.Context()
-
-		// Placeholder hostId — overwritten in hub.go when host joins via WebSocket
-		code, err := createRoom(ctx, rdb, "pending")
-		if err != nil {
-			http.Error(w, "Failed to create room", http.StatusInternalServerError)
-			return
-		}
+		code := createRoom(rs)
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
@@ -103,8 +63,8 @@ func handleCreateRoom(rdb *redis.Client) http.HandlerFunc {
 
 // GET /rooms/:code
 // Validates room exists, returns member count and full status.
-// Member count comes from the Hub — Redis does not track live membership.
-func handleGetRoom(rdb *redis.Client, hub *Hub) http.HandlerFunc {
+// Member count comes from the Hub — the room store does not track live membership.
+func handleGetRoom(rs *RoomStore, hub *Hub) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -120,15 +80,7 @@ func handleGetRoom(rdb *redis.Client, hub *Hub) http.HandlerFunc {
 			return
 		}
 
-		ctx := r.Context()
-
-		exists, err := roomExists(ctx, rdb, code)
-		if err != nil {
-			http.Error(w, "Failed to check room", http.StatusInternalServerError)
-			return
-		}
-
-		if !exists {
+		if !rs.Exists(code) {
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"exists": false,
@@ -136,7 +88,7 @@ func handleGetRoom(rdb *redis.Client, hub *Hub) http.HandlerFunc {
 			return
 		}
 
-		// Live member count comes from Hub — not Redis
+		// Live member count comes from Hub — not the room store
 		memberCount := hub.roomMemberCount(code)
 		full := memberCount >= MaxRoomMembers
 
