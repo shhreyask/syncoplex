@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -9,10 +8,9 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/redis/go-redis/v9"
 )
 
-// ── Upgrader ────────────────────────────────────────────────────────────────
+// ── Upgrader ──────────────────────────────────────────────────────────────────
 
 func newUpgrader(allowedOrigin string) websocket.Upgrader {
 	return websocket.Upgrader{
@@ -24,13 +22,13 @@ func newUpgrader(allowedOrigin string) websocket.Upgrader {
 	}
 }
 
-// ── Types ────────────────────────────────────────────────────────────────────
+// ── Types ─────────────────────────────────────────────────────────────────────
 
 type Client struct {
 	userId           string
 	name             string
 	roomCode         string
-	sessionToken     string // held in memory; written to Redis only on disconnect
+	sessionToken     string // held in memory; written to SessionStore only on disconnect
 	isReconnect      bool
 	conn             *websocket.Conn
 	send             chan []byte
@@ -65,7 +63,7 @@ type SyncCommandPayload struct {
 	IsPlaying bool    `json:"isPlaying"`
 }
 
-// ── Event System ─────────────────────────────────────────────────────────────
+// ── Event System ──────────────────────────────────────────────────────────────
 //
 // The Hub is an event loop. One goroutine, one inbox (h.events), sequential
 // dispatch. All hub state mutations happen inside execute() on the hub goroutine.
@@ -141,7 +139,7 @@ func (e *FileVerifyEvent)  execute(h *Hub) { h.handleFileVerifyCommand(e.client,
 func (e *WebRTCRelayEvent) execute(h *Hub) { h.handleWebRTCRelay(e.client, e.targetUserId, e.data) }
 func (e *MicStateEvent)    execute(h *Hub) { h.handleMicState(e.client, e.muted) }
 
-// ── Hub ──────────────────────────────────────────────────────────────────────
+// ── Hub ───────────────────────────────────────────────────────────────────────
 
 type Hub struct {
 	// mu guards h.rooms against concurrent reads from HTTP handler goroutines
@@ -155,11 +153,12 @@ type Hub struct {
 	hostIds          map[string]string
 	playbackStates   map[string]RoomPlaybackState
 	fileVerifyStates map[string]RoomFileVerifyState
-	rdb              *redis.Client
+	roomStore        *RoomStore
+	sessionStore     *SessionStore
 	events           chan HubEvent // single inbox — replaces register, unregister, broadcast
 }
 
-// ── Envelope ─────────────────────────────────────────────────────────────────
+// ── Envelope ──────────────────────────────────────────────────────────────────
 
 type Envelope struct {
 	Type    string          `json:"type"`
@@ -172,20 +171,21 @@ func makeEnvelope(msgType string, payload interface{}) []byte {
 	return env
 }
 
-// ── Hub Constructor ──────────────────────────────────────────────────────────
+// ── Hub Constructor ───────────────────────────────────────────────────────────
 
-func newHub(rdb *redis.Client) *Hub {
+func newHub(rs *RoomStore, ss *SessionStore) *Hub {
 	return &Hub{
 		rooms:            make(map[string]map[string]*Client),
 		hostIds:          make(map[string]string),
 		playbackStates:   make(map[string]RoomPlaybackState),
 		fileVerifyStates: make(map[string]RoomFileVerifyState),
-		rdb:              rdb,
+		roomStore:        rs,
+		sessionStore:     ss,
 		events:           make(chan HubEvent, 512),
 	}
 }
 
-// ── Hub Run Loop ─────────────────────────────────────────────────────────────
+// ── Hub Run Loop ──────────────────────────────────────────────────────────────
 //
 // The hub goroutine. Owns rooms, hostIds, playbackStates, and fileVerifyStates
 // exclusively. All mutations to these maps happen here, serialised through h.events.
@@ -209,11 +209,9 @@ func (h *Hub) run() {
 	}
 }
 
-// ── Register ─────────────────────────────────────────────────────────────────
+// ── Register ──────────────────────────────────────────────────────────────────
 
 func (h *Hub) handleRegister(client *Client) {
-	ctx := context.Background()
-
 	// Lock only for the h.rooms write — synchronises with roomMemberCount.
 	h.mu.Lock()
 	if _, ok := h.rooms[client.roomCode]; !ok {
@@ -242,10 +240,9 @@ func (h *Hub) handleRegister(client *Client) {
 	// hostIds — hub goroutine only, no mutex needed.
 	if isFirstMember {
 		h.hostIds[client.roomCode] = client.userId
-		h.rdb.HSet(ctx, "room:"+client.roomCode, "hostId", client.userId)
 	}
 
-	resetRoomTTL(ctx, h.rdb, client.roomCode)
+	h.roomStore.ResetTTL(client.roomCode, RoomTTL*time.Second)
 
 	client.send <- makeEnvelope("session_init", map[string]string{
 		"userId": client.userId,
@@ -277,7 +274,7 @@ func (h *Hub) handleRegister(client *Client) {
 	}))
 }
 
-// ── Unregister ───────────────────────────────────────────────────────────────
+// ── Unregister ────────────────────────────────────────────────────────────────
 
 func (h *Hub) handleUnregister(client *Client) {
 	room, ok := h.rooms[client.roomCode]
@@ -292,7 +289,7 @@ func (h *Hub) handleUnregister(client *Client) {
 	h.dropClient(room, client)
 }
 
-// ── Relay ────────────────────────────────────────────────────────────────────
+// ── Relay ─────────────────────────────────────────────────────────────────────
 
 func (h *Hub) handleRelay(e *RelayEvent) {
 	room, ok := h.rooms[e.roomCode]
@@ -316,7 +313,7 @@ func (h *Hub) handleRelay(e *RelayEvent) {
 	}
 }
 
-// ── WebRTC Relay ─────────────────────────────────────────────────────────────
+// ── WebRTC Relay ──────────────────────────────────────────────────────────────
 //
 // Targeted delivery: one sender → one recipient in the same room.
 // Rate limited to 30 messages/second per sender — legitimate full-mesh
@@ -387,7 +384,7 @@ func (h *Hub) handleWebRTCRelay(sender *Client, targetUserId string, raw []byte)
 	}
 }
 
-// ── Mic State Broadcast ──────────────────────────────────────────────────────
+// ── Mic State Broadcast ───────────────────────────────────────────────────────
 
 func (h *Hub) handleMicState(c *Client, muted bool) {
 	h.broadcastToOthers(c.roomCode, c.userId, makeEnvelope("mic_state", map[string]interface{}{
@@ -396,7 +393,7 @@ func (h *Hub) handleMicState(c *Client, muted bool) {
 	}))
 }
 
-// ── Broadcast Helpers ────────────────────────────────────────────────────────
+// ── Broadcast Helpers ─────────────────────────────────────────────────────────
 //
 // Both helpers run only on the hub goroutine. h.rooms is safe to read without
 // a lock — the only concurrent accessor is roomMemberCount (HTTP goroutine),
@@ -444,7 +441,7 @@ func (h *Hub) broadcastToOthers(roomCode, excludeUserId string, data []byte) {
 	}
 }
 
-// ── Sync Command ─────────────────────────────────────────────────────────────
+// ── Sync Command ──────────────────────────────────────────────────────────────
 //
 // Runs on the hub goroutine via SyncEvent.execute — h.rooms and h.playbackStates
 // are safe to access with no lock. Rate-limit fields (lastSyncWindow, syncCount)
@@ -550,7 +547,7 @@ func (h *Hub) handleSyncCommand(c *Client, raw json.RawMessage) {
 	}))
 }
 
-// ── FileVerify Command ───────────────────────────────────────────────────────
+// ── FileVerify Command ────────────────────────────────────────────────────────
 //
 // Runs on the hub goroutine via FileVerifyEvent.execute.
 // h.fileVerifyStates is hub-goroutine-only — no mutex needed.
@@ -634,27 +631,11 @@ func (h *Hub) handleFileVerifyCommand(c *Client, hex string) {
 	}
 }
 
-// ── Drop Client ──────────────────────────────────────────────────────────────
-
-func writeSessionOnDisconnect(ctx context.Context, rdb *redis.Client, client *Client) {
-	if client.sessionToken == "" {
-		return
-	}
-	s := Session{
-		UserID:   client.userId,
-		Name:     client.name,
-		RoomCode: client.roomCode,
-	}
-	if err := storeSession(ctx, rdb, client.sessionToken, s); err != nil {
-		log.Printf("hub: failed to write session on disconnect for %s — %v", client.userId, err)
-	}
-}
+// ── Drop Client ───────────────────────────────────────────────────────────────
 
 func (h *Hub) dropClient(room map[string]*Client, client *Client) {
-	ctx := context.Background()
-
-	// Write session to Redis first — this is when the reconnect clock starts.
-	writeSessionOnDisconnect(ctx, h.rdb, client)
+	// Write session first — this is when the reconnect clock starts.
+	writeSessionOnDisconnect(h.sessionStore, client)
 
 	// Lock only for the h.rooms write — synchronises with roomMemberCount.
 	// hostIds, playbackStates, and fileVerifyStates are hub-goroutine-only;
@@ -711,7 +692,6 @@ func (h *Hub) dropClient(room map[string]*Client, client *Client) {
 	if client.userId == h.hostIds[client.roomCode] && len(room) > 0 {
 		for _, next := range room {
 			h.hostIds[client.roomCode] = next.userId
-			h.rdb.HSet(ctx, "room:"+client.roomCode, "hostId", next.userId)
 			h.broadcastToRoom(client.roomCode, makeEnvelope("host_changed", map[string]string{
 				"userId": next.userId,
 				"name":   next.name,
@@ -722,15 +702,13 @@ func (h *Hub) dropClient(room map[string]*Client, client *Client) {
 
 	// TTL: reset to full duration while members remain; shrink to grace period when empty
 	if remaining > 0 {
-		resetRoomTTL(ctx, h.rdb, client.roomCode)
+		h.roomStore.ResetTTL(client.roomCode, RoomTTL*time.Second)
 	} else {
-		if err := h.rdb.Expire(ctx, "room:"+client.roomCode, 5*time.Minute).Err(); err != nil {
-			log.Printf("hub: failed to set empty-room TTL for %s — %v", client.roomCode, err)
-		}
+		h.roomStore.ResetTTL(client.roomCode, 5*time.Minute)
 	}
 }
 
-// ── Room Member Count ────────────────────────────────────────────────────────
+// ── Room Member Count ─────────────────────────────────────────────────────────
 //
 // Called from HTTP handler goroutines. RLock synchronises with the Lock
 // acquired during h.rooms writes in handleRegister and dropClient.
@@ -741,25 +719,22 @@ func (h *Hub) roomMemberCount(roomCode string) int {
 	return len(h.rooms[roomCode])
 }
 
-// ── TTL Heartbeat ────────────────────────────────────────────────────────────
+// ── TTL Heartbeat ─────────────────────────────────────────────────────────────
 //
 // Called directly from run()'s ticker case — never routed through h.events.
 // Runs on the hub goroutine; h.rooms is safe to iterate with no lock.
 
 func (h *Hub) handleHeartbeat() {
-	ctx := context.Background()
 	for roomCode, room := range h.rooms {
 		if len(room) > 0 {
-			if err := h.rdb.Expire(ctx, "room:"+roomCode, RoomTTL*time.Second).Err(); err != nil {
-				log.Printf("hub: TTL heartbeat failed for room %s — %v", roomCode, err)
-			}
+			h.roomStore.ResetTTL(roomCode, RoomTTL*time.Second)
 		}
 	}
 }
 
-// ── WebSocket Handler ────────────────────────────────────────────────────────
+// ── WebSocket Handler ─────────────────────────────────────────────────────────
 
-func handleWebSocket(hub *Hub, rdb *redis.Client, upgrader websocket.Upgrader) http.HandlerFunc {
+func handleWebSocket(hub *Hub, upgrader websocket.Upgrader) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		code := r.URL.Path[len("/ws/"):]
 		code = sanitizeName(code)
@@ -770,10 +745,7 @@ func handleWebSocket(hub *Hub, rdb *redis.Client, upgrader websocket.Upgrader) h
 			return
 		}
 
-		ctx := r.Context()
-
-		exists, err := roomExists(ctx, rdb, code)
-		if err != nil || !exists {
+		if !hub.roomStore.Exists(code) {
 			http.Error(w, "Room not found", http.StatusNotFound)
 			return
 		}
@@ -833,7 +805,7 @@ func handleWebSocket(hub *Hub, rdb *redis.Client, upgrader websocket.Upgrader) h
 		var isReconnect bool
 
 		if joinPayload.SessionToken != "" {
-			session, newToken, err := reconnectSession(ctx, rdb, joinPayload.SessionToken)
+			session, newToken, err := reconnectSession(hub.sessionStore, joinPayload.SessionToken)
 			if err != nil {
 				log.Printf("hub: session retrieve error — %v", err)
 			}
@@ -890,7 +862,7 @@ func handleWebSocket(hub *Hub, rdb *redis.Client, upgrader websocket.Upgrader) h
 	}
 }
 
-// ── Read Pump ────────────────────────────────────────────────────────────────
+// ── Read Pump ─────────────────────────────────────────────────────────────────
 
 func (c *Client) readPump() {
 	defer func() {
@@ -988,7 +960,7 @@ func (c *Client) readPump() {
 	}
 }
 
-// ── Write Pump ───────────────────────────────────────────────────────────────
+// ── Write Pump ────────────────────────────────────────────────────────────────
 
 func (c *Client) writePump() {
 	pingTicker := time.NewTicker(((PongWait * time.Second) * 9) / 10) // ~54s
@@ -1020,7 +992,7 @@ func (c *Client) writePump() {
 	}
 }
 
-// ── Utility ──────────────────────────────────────────────────────────────────
+// ── Utility ───────────────────────────────────────────────────────────────────
 
 func stringToUpper(s string) string {
 	result := make([]byte, len(s))

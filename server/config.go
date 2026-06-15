@@ -23,8 +23,6 @@ const (
 
 type Config struct {
 	Port          string
-	RedisAddr     string
-	RedisPassword string
 	AllowedOrigin string
 
 	// Metered TURN — ephemeral credentials via REST API
@@ -35,8 +33,6 @@ type Config struct {
 func LoadConfig() Config {
 	cfg := Config{
 		Port:            getEnv("PORT", "8080"),
-		RedisAddr:       getEnv("REDIS_ADDR", "127.0.0.1:6379"),
-		RedisPassword:   getEnv("REDIS_PASSWORD", ""),
 		AllowedOrigin:   getEnv("ALLOWED_ORIGIN", "https://syncoplex.app"),
 		MeteredTurnHost: getEnv("METERED_TURN_HOST", ""),
 		MeteredAPIKey:   getEnv("METERED_API_KEY", ""),
@@ -45,9 +41,6 @@ func LoadConfig() Config {
 	// Validate port is a real number — fail fast on bad config
 	if _, err := strconv.Atoi(cfg.Port); err != nil {
 		log.Fatalf("config: PORT %q is not a valid number", cfg.Port)
-	}
-	if cfg.RedisPassword == "" {
-		log.Println("config: WARNING — REDIS_PASSWORD is not set")
 	}
 
 	if cfg.MeteredTurnHost == "" || cfg.MeteredAPIKey == "" {

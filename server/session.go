@@ -1,23 +1,18 @@
 package main
 
 import (
-	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
-	"log"
 	"time"
-
-	"github.com/redis/go-redis/v9"
 )
 
 // ── Session Data ──────────────────────────────────────────────────────────────
 
 type Session struct {
-	UserID   string `json:"userId"`
-	Name     string `json:"name"`
-	RoomCode string `json:"roomCode"`
+	UserID   string
+	Name     string
+	RoomCode string
 }
 
 // ── Token Generation ──────────────────────────────────────────────────────────
@@ -42,51 +37,6 @@ func generateUserID() (string, error) {
 		bytes[0:4], bytes[4:6], bytes[6:8], bytes[8:10], bytes[10:16]), nil
 }
 
-// ── Redis Store / Retrieve ────────────────────────────────────────────────────
-
-func storeSession(ctx context.Context, rdb *redis.Client, token string, s Session) error {
-	data, err := json.Marshal(s)
-	if err != nil {
-		return fmt.Errorf("session: failed to marshal — %w", err)
-	}
-
-	key := "session:" + token
-	if err := rdb.Set(ctx, key, data, SessionTTL*time.Second).Err(); err != nil {
-		return fmt.Errorf("session: failed to store in Redis — %w", err)
-	}
-
-	return nil
-}
-
-func retrieveSession(ctx context.Context, rdb *redis.Client, token string) (*Session, error) {
-	if token == "" {
-		return nil, nil
-	}
-
-	key := "session:" + token
-	data, err := rdb.Get(ctx, key).Bytes()
-	if err == redis.Nil {
-		// Token expired or never existed — not an error, treat as fresh join
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("session: Redis read failed — %w", err)
-	}
-
-	var s Session
-	if err := json.Unmarshal(data, &s); err != nil {
-		return nil, fmt.Errorf("session: failed to unmarshal — %w", err)
-	}
-
-	// Delete immediately — one-time use token
-	if err := rdb.Del(ctx, key).Err(); err != nil {
-		// Non-fatal — log and continue, session is still valid
-		log.Printf("session: failed to delete token after retrieval — %v", err)
-	}
-
-	return &s, nil
-}
-
 // ── New Session ───────────────────────────────────────────────────────────────
 //
 // Called on every fresh connect (no token, or expired token).
@@ -109,16 +59,14 @@ func newSession() (string, string, error) {
 // ── Reconnect Session ─────────────────────────────────────────────────────────
 //
 // Called when a client presents a sessionToken on connect.
-// Issues a fresh token for the next potential reconnect window.
+// Retrieves and deletes the session (one-time use), then issues a fresh
+// token for the next potential reconnect window.
 // Returns the restored session and the new token.
 
-func reconnectSession(ctx context.Context, rdb *redis.Client, token string) (*Session, string, error) {
-	s, err := retrieveSession(ctx, rdb, token)
-	if err != nil {
-		return nil, "", err
-	}
+func reconnectSession(ss *SessionStore, token string) (*Session, string, error) {
+	s := ss.Retrieve(token)
 	if s == nil {
-		// Token expired — caller treats this as a fresh join
+		// Token expired or never existed — caller treats this as a fresh join
 		return nil, "", nil
 	}
 
@@ -129,4 +77,20 @@ func reconnectSession(ctx context.Context, rdb *redis.Client, token string) (*Se
 	}
 
 	return s, newToken, nil
+}
+
+// ── Write Session on Disconnect ───────────────────────────────────────────────
+//
+// Called from dropClient on the hub goroutine. Writes the session to the
+// SessionStore — this is when the reconnect clock starts.
+
+func writeSessionOnDisconnect(ss *SessionStore, client *Client) {
+	if client.sessionToken == "" {
+		return
+	}
+	ss.Store(client.sessionToken, Session{
+		UserID:   client.userId,
+		Name:     client.name,
+		RoomCode: client.roomCode,
+	}, SessionTTL*time.Second)
 }
