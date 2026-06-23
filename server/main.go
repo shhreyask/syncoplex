@@ -27,8 +27,8 @@ func main() {
 	roomLookupLimiter := newRateLimiter(RateRoomLookup, time.Minute)
 	turnLimiter       := newRateLimiter(RateTurnCredentials, time.Minute)
 
-		wrap := func(handler http.Handler, limiter *rateLimiter) http.Handler {
-		return securityHeaders(cfg.AllowedOrigin)(cors(cfg.AllowedOrigin)(limiter.middleware(handler)))
+	wrap := func(handler http.Handler, limiter *rateLimiter) http.Handler {
+	return securityHeaders(cfg.AllowedOrigin)(cors(cfg.AllowedOrigin)(limiter.middleware(handler)))
 	}
 
 	// ── Static File Server ────────────────────────────────────────────────────
