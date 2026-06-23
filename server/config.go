@@ -24,6 +24,7 @@ const (
 type Config struct {
 	Port          string
 	AllowedOrigin string
+	PublicDir     string
 
 	// Metered TURN — ephemeral credentials via REST API
 	MeteredTurnHost string
@@ -34,6 +35,7 @@ func LoadConfig() Config {
 	cfg := Config{
 		Port:            getEnv("PORT", "8080"),
 		AllowedOrigin:   getEnv("ALLOWED_ORIGIN", "https://syncoplex.app"),
+		PublicDir:       getEnv("PUBLIC_DIR", "../frontend/public"),
 		MeteredTurnHost: getEnv("METERED_TURN_HOST", ""),
 		MeteredAPIKey:   getEnv("METERED_API_KEY", ""),
 	}

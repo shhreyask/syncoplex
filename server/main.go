@@ -27,13 +27,13 @@ func main() {
 	roomLookupLimiter := newRateLimiter(RateRoomLookup, time.Minute)
 	turnLimiter       := newRateLimiter(RateTurnCredentials, time.Minute)
 
-	wrap := func(handler http.Handler, limiter *rateLimiter) http.Handler {
-		return securityHeaders(cors(cfg.AllowedOrigin)(limiter.middleware(handler)))
+		wrap := func(handler http.Handler, limiter *rateLimiter) http.Handler {
+		return securityHeaders(cfg.AllowedOrigin)(cors(cfg.AllowedOrigin)(limiter.middleware(handler)))
 	}
 
 	// ── Static File Server ────────────────────────────────────────────────────
 
-	const publicDir = "../frontend/public"
+	publicDir := cfg.PublicDir
 	fileServer := http.FileServer(http.Dir(publicDir))
 
 	staticHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -63,10 +63,10 @@ func main() {
 	mux.Handle("/rooms", wrap(handleCreateRoom(roomStore), roomCreateLimiter))
 	mux.Handle("/rooms/", wrap(handleGetRoom(roomStore, hub), roomLookupLimiter))
 	mux.Handle("/api/turn-credentials", wrap(http.HandlerFunc(handleTurnCredentials(cfg)), turnLimiter))
-	mux.Handle("/ws/", securityHeaders(cors(cfg.AllowedOrigin)(
+	mux.Handle("/ws/", securityHeaders(cfg.AllowedOrigin)(cors(cfg.AllowedOrigin)(
 		http.HandlerFunc(handleWebSocket(hub, upgrader)),
 	)))
-	mux.Handle("/", securityHeaders(staticHandler))
+	mux.Handle("/", securityHeaders(cfg.AllowedOrigin)(staticHandler))
 
 	// ── Server ────────────────────────────────────────────────────────────────
 

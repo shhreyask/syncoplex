@@ -10,18 +10,27 @@ import (
 
 // ── Security Headers ─────────────────────────────────────────────────────────
 
-func securityHeaders(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Security-Policy",
-			"default-src 'self'; connect-src 'self' wss://syncoplex.app; media-src blob:; script-src 'self'; style-src 'self'")
-		w.Header().Set("X-Frame-Options", "DENY")
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
-		w.Header().Set("Permissions-Policy", "camera=*, microphone=*")
-		next.ServeHTTP(w, r)
-	})
-}
+func securityHeaders(allowedOrigin string) func(http.Handler) http.Handler {
+	// Derive the WebSocket origin from the HTTP origin
+	wsOrigin := allowedOrigin
+	if len(wsOrigin) > 8 && wsOrigin[:8] == "https://" {
+		wsOrigin = "wss://" + wsOrigin[8:]
+	} else if len(wsOrigin) > 7 && wsOrigin[:7] == "http://" {
+		wsOrigin = "ws://" + wsOrigin[7:]
+	}
 
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Security-Policy",
+				"default-src 'self'; connect-src 'self' "+wsOrigin+"; media-src blob:; script-src 'self'; style-src 'self'")
+			w.Header().Set("X-Frame-Options", "DENY")
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+			w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+			w.Header().Set("Permissions-Policy", "camera=*, microphone=*")
+			next.ServeHTTP(w, r)
+	})
+  }
+}
 // ── CORS ─────────────────────────────────────────────────────────────────────
 
 func cors(allowedOrigin string) func(http.Handler) http.Handler {
