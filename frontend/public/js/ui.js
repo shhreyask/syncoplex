@@ -459,3 +459,21 @@ const initFromUrl = () => {
 }
 
 initFromUrl()
+
+// ── Help Dialog ───────────────────────────────────────────────────
+
+const helpDialog = $('help-dialog')
+const btnHelp    = $('btn-help')
+
+btnHelp.addEventListener('click', () => helpDialog.showModal())
+$('btn-close-help').addEventListener('click', () => helpDialog.close())
+helpDialog.addEventListener('click', (e) => {
+  if (e.target === helpDialog) helpDialog.close()
+})
+
+// Show help button only on landing
+new MutationObserver(() => {
+  btnHelp.hidden = document.body.dataset.view !== 'landing'
+}).observe(document.body, { attributes: true, attributeFilter: ['data-view'] })
+
+btnHelp.hidden = document.body.dataset.view !== 'landing'
