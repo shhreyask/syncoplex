@@ -69,7 +69,7 @@
         <ul id="members-list" class="members-list"></ul>
       </div>
 
-      <p class="lobby-hint">Once everyone is here, pick a file and start watching.</p>
+      <p class="lobby-hint">Pick a file to start watching.</p>
 
       <!-- Fingerprint feedback — shown above the button, hidden until a file is chosen -->
       <!-- No fileVerify-pending class here — added dynamically by ui.js only when showing -->
@@ -122,6 +122,21 @@
     </div>
 
   </section>
+
+  <!-- ── Help Dialog ───────────────────────────────────────────── -->
+  <button id="btn-help" class="help-btn" title="What is Syncoplex?" aria-label="Help">?</button>
+
+    <dialog id="help-dialog" class="help-dialog">
+    <h2>What is Syncoplex?</h2>
+    <ul>
+      <li>A watchparty app for <strong>local video files.</strong></li>
+      <li>Everyone loads the <strong>exact same file</strong> on their own device.</li>
+      <li>Play, pause, or seek anywhere. Every device stays in sync.</li>
+      <li>Works by sharing playback events over a live connection. No video is uploaded or streamed.</li>
+      <li><a href="https://github.com/shhreyask/syncoplex" target="_blank" rel="noopener" class="help-link">Audit the source code here.</a></li>
+    </ul>
+    <button id="btn-close-help" class="btn btn-secondary">Got it</button>
+  </dialog>
 
   <!-- JS — order matters: state → ws → player → sync → fileVerify → webrtc → ui -->
   <!-- workerFileVerify.js is NOT listed here — loaded only via new Worker() -->

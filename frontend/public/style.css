@@ -519,3 +519,72 @@ body[data-view="watch"]   #view-watch    { display: flex; }
   animation: spin 0.7s linear infinite;
   flex-shrink: 0;
 }
+
+/* ── Help Button & Dialog ────────────────────────────────────────── */
+
+.help-btn {
+  position: fixed;
+  bottom: 1.25rem;
+  right: 1.25rem;
+  width: 36px;
+  height: 36px;
+  border: 1px solid var(--accent);
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--accent);
+  font-family: var(--font-body);
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  z-index: 200;
+  transition: background 0.15s;
+}
+.help-btn:hover {
+  background: var(--surface-2);
+}
+
+.help-dialog {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 2rem;
+  max-width: 380px;
+  width: 90%;
+  font-family: var(--font-body);
+  font-size: 0.88rem;
+  line-height: 1.55;
+  margin: auto;
+}
+.help-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.6);
+}
+.help-dialog h2 {
+  font-size: 1.05rem;
+  color: var(--accent);
+  margin-bottom: 0.85rem;
+}
+.help-dialog ul {
+  list-style: none;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  color: var(--text-dim);
+}
+.help-dialog li::before {
+  content: '→ ';
+  color: var(--accent);
+}
+.help-dialog li { font-size: 0.84rem; }
+.help-dialog #btn-close-help {
+  margin-top: 1.25rem;
+  width: 100%;
+}
+.help-dialog .help-link {
+  color: var(--accent);
+  text-decoration: none;
+}
+.help-dialog .help-link:hover {
+  text-decoration: underline;
+}
