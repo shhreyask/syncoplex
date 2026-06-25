@@ -12,8 +12,12 @@ RUN cd server && CGO_ENABLED=0 go build -o /syncoplex .
 FROM alpine:3.21
 RUN apk add --no-cache ca-certificates
 
+RUN adduser -D -u 1001 appuser
+
 COPY --from=builder /syncoplex /syncoplex
 COPY frontend/public /app/frontend/public
+
+USER appuser
 
 ENV PORT=8080
 ENV PUBLIC_DIR=/app/frontend/public
