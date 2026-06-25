@@ -246,6 +246,7 @@ const renderWsStatus = () => {
     wsStatusLabel.textContent = 'Connected'
     reconnectPill.classList.remove('visible')
     btnPickFile.hidden = false   // show only when connected
+    startKeepAlive()
   } else if (status === 'connecting') {
     wsStatusDot.classList.add('status-connecting')
     wsStatusLabel.textContent = 'Connecting…'
@@ -401,6 +402,7 @@ window.addEventListener('popstate', (e) => {
   if (targetView === 'landing') {
     webrtc.teardownAll()   // idempotent — safe if already called above
     disconnect()
+    stopKeepAlive()
     resetRoomState()
     showView('landing')
     return
