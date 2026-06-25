@@ -259,6 +259,10 @@ body[data-view="watch"]   #view-watch    { display: flex; }
   background: #111;
 }
 
+.tile-self video {
+  transform: scaleX(-1);
+}
+
 /* ── WebRTC Controls Overlay (right edge of window) ──────────────
  *
  * Vertical strip pinned to the right edge of #view-watch.
