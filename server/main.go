@@ -66,6 +66,9 @@ func main() {
 	mux.Handle("/ws/", securityHeaders(cfg.AllowedOrigin)(cors(cfg.AllowedOrigin)(
 		http.HandlerFunc(handleWebSocket(hub, upgrader)),
 	)))
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
 	mux.Handle("/", securityHeaders(cfg.AllowedOrigin)(staticHandler))
 
 	// ── Server ────────────────────────────────────────────────────────────────
